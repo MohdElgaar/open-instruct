@@ -1933,6 +1933,9 @@ def run_training(
         )
     else:
         eval_data_loader = None
+
+    num_prompts_to_refill = 0
+    avg_step_time = 0.0
     training_start_time = time.perf_counter()  # Track overall training start time
     maybe_update_beaker_description(
         current_step=resume_training_step - 1,
@@ -2000,6 +2003,21 @@ def run_training(
             actor_manager,
         )
         num_total_tokens += num_step_tokens
+
+        logger.debug(f"[Main Thread] Triggered weight sync for step {training_step}")
+        weight_sync_trigger_event.set()
+
+        current_step_time = time.perf_counter() - start_time
+        if avg_step_time == 0:
+            avg_step_time = current_step_time
+        else:
+            avg_step_time = 0.1 * current_step_time + 0.9 * avg_step_time
+
+        remaining_steps = args.num_training_steps - training_step
+        eta_seconds = remaining_steps * avg_step_time
+        logger.info(
+            f"[Main Thread] ⏳ ETA to finish: {utils.format_eta(eta_seconds)} ({avg_step_time:.2f}s/step, remaining {remaining_steps} steps)"
+        )
 
         # Checkpoint after one_training_step (or even if it was skipped)
         # This ensures we checkpoint progress even if the exact checkpoint step has no data
