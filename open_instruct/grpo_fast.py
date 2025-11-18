@@ -1045,6 +1045,8 @@ def setup_runtime_variables(
         raise ValueError(f"eval_pass_at_k must be >= 1, got {args.eval_pass_at_k}.")
     args.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
     args.output_dir = os.path.join(args.output_dir, args.run_name)
+    if args.checkpoint_state_dir is None:
+        args.checkpoint_state_dir = args.output_dir
     streaming_config.dataset_local_cache_dir = os.path.abspath(streaming_config.dataset_local_cache_dir)
     if is_beaker_job():
         streaming_config.dataset_local_cache_dir = (
