@@ -64,13 +64,21 @@ WORKDIR /stage/
 
 ENV UV_CACHE_DIR=/root/.cache/uv \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
-    UV_COMPILE_BYTECODE=0
+    UV_COMPILE_BYTECODE=0 \
+    NLTK_DATA=/usr/share/nltk_data
 
 # Install dependencies
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv run --frozen python -m nltk.downloader punkt punkt_tab words
+    uv run --frozen python -c "import os, nltk; download_dir=os.environ.get('NLTK_DATA', '/usr/share/nltk_data'); os.makedirs(download_dir, exist_ok=True); nltk.download('punkt', download_dir=download_dir); nltk.download('punkt_tab', download_dir=download_dir)"
+
+RUN --mount=type=bind,source=open-instruct,target=open-instruct \
+    uv pip install -e open-instruct
+
+RUN chmod -R a+r ${NLTK_DATA}
+
+RUN uv pip install --no-cache-dir notebook
 
 # Separate COPY commands required: Docker copies directory *contents*, not the directory itself
 COPY configs configs
@@ -85,3 +93,13 @@ ARG GIT_COMMIT="" \
 ENV GIT_COMMIT=${GIT_COMMIT} \
     GIT_BRANCH=${GIT_BRANCH} \
     PATH=/stage/.venv/bin:$PATH
+ 
+RUN groupadd -g 1006 students && \
+    useradd -m -s /bin/bash -u 1004 -g 1006 mohamed && \
+    usermod -a -G root mohamed && \
+    echo "mohamed ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    mkdir -p /home/mohamed/.cache && \
+    chown -R mohamed:students /home/mohamed && \
+    chmod -R g+rwx /root
+
+WORKDIR /workspace
