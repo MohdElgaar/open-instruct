@@ -1790,6 +1790,8 @@ GPU_SPECS = {
     # DGX Spark GB10 (Blackwell) - unified LPDDR5X memory with CPU
     # Specs from https://www.nvidia.com/en-us/products/workstations/dgx-spark/
     "gb10": {"flops": 104e12, "memory_size": 128e9, "memory_bandwidth": 273e9},  # 273 GB/s LPDDR5X unified
+    # Specs from https://www.techpowerup.com/gpu-specs/geforce-rtx-2080-ti.c3305
+    "2080 ti": {"flops": 13.45e12, "memory_size": 11e9, "memory_bandwidth": 616e9},  # 13.45 TFLOPS FP32, 11GB, 616 GB/s GDDR6
 }
 
 # Conventions for FLOPs calculations (fixed; not switches)
