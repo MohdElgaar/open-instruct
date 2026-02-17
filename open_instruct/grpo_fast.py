@@ -286,7 +286,7 @@ class PolicyTrainerRayProcess(RayProcess):
         optimization_steps_done = 0
         if args.checkpoint_state_dir:
             # check if the dir exists
-            if not os.path.exists(args.checkpoint_state_dir):
+            if not os.path.exists(args.checkpoint_state_dir) or len(os.listdir(args.checkpoint_state_dir)) == 0:
                 logger.warning(
                     f"Skipping loading checkpoint state from {args.checkpoint_state_dir} because it does not exist!"
                 )
