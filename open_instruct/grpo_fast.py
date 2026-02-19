@@ -1936,7 +1936,6 @@ def run_training(
     else:
         eval_data_loader = None
 
-    num_prompts_to_refill = 0
     avg_step_time = 0.0
     training_start_time = time.perf_counter()  # Track overall training start time
     maybe_update_beaker_description(
@@ -2005,9 +2004,6 @@ def run_training(
             actor_manager,
         )
         num_total_tokens += num_step_tokens
-
-        logger.debug(f"[Main Thread] Triggered weight sync for step {training_step}")
-        weight_sync_trigger_event.set()
 
         current_step_time = time.perf_counter() - start_time
         if avg_step_time == 0:
