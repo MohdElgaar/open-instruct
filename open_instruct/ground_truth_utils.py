@@ -26,7 +26,8 @@ from litellm import acompletion
 
 from open_instruct import context_window_checker, logger_utils
 from open_instruct.if_functions import IF_FUNCTIONS_MAP
-from open_instruct.IFEvalG import instructions_registry
+from open_instruct.IFEvalG import instructions_registry as ifeval_instructions_registry
+from open_instruct.IFBench import instructions_registry as ifbench_instructions_registry
 from open_instruct.judge_utils import EXTRACTOR_MAP, JUDGE_PROMPT_MAP, PRICE_PER_TOKEN, build_messages
 from open_instruct.math_utils import (
     get_unnormalized_answer,
@@ -319,6 +320,7 @@ class IFEvalVerifier(VerifierFunction):
 
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
         super().__init__("ifeval", weight=1.0)
+        self.instruction_dict = ifeval_instructions_registry.INSTRUCTION_DICT
 
     def __call__(
         self,
@@ -328,7 +330,6 @@ class IFEvalVerifier(VerifierFunction):
         query: str | None = None,
         rollout_state: dict | None = None,
     ) -> VerificationResult:
-        instruction_dict = instructions_registry.INSTRUCTION_DICT
         constraint_dict = ast.literal_eval(label)
         constraint_dict = constraint_dict[0]
         if isinstance(constraint_dict, str):
@@ -344,7 +345,7 @@ class IFEvalVerifier(VerifierFunction):
             if args is None:
                 args = {}
             args = {k: v for k, v in args.items() if v is not None}
-            instruction_cls = instruction_dict[instruction_key]
+            instruction_cls = self.instruction_dict[instruction_key]
             instruction_instance = instruction_cls(instruction_key)
             instruction_instance.build_description(**args)
             if prediction.strip() and instruction_instance.check_following(answer):
@@ -352,6 +353,19 @@ class IFEvalVerifier(VerifierFunction):
             else:
                 rewards.append(0.0)
         return VerificationResult(score=sum(rewards) / len(rewards))
+
+class IFBenchVerifier(IFEvalVerifier, VerifierFunction):
+    """
+    Verifier for ifbench tasks that delegates evaluation to a function
+    specified in the constraint.
+
+    The constraint(s) are a list of constraint ids.
+    This list is found under the key "instruction_id" in the ground_truth dict.
+    """
+
+    def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
+        super(IFEvalVerifier, self).__init__("ifbench", weight=1.0)
+        self.instruction_dict = ifbench_instructions_registry.INSTRUCTION_DICT
 
 
 class IFEvalVerifierOld(VerifierFunction):
