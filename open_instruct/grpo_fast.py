@@ -1983,6 +1983,7 @@ def run_training(
                     is_eval=True,
                     base_env_config=base_env_config,
                 )
+            eval_data_loader.reset()
 
         episode += streaming_config.num_unique_prompts_rollout * streaming_config.num_samples_per_prompt_rollout
 
