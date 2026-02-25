@@ -1061,7 +1061,7 @@ def setup_experiment_tracking(
     model_config: ModelConfig,
     streaming_config: data_loader_lib.StreamingDataLoaderConfig,
     vllm_config: data_loader_lib.VLLMConfig,
-    tools_config: ToolsConfig,
+    tools_config: EnvsConfig,
 ):
     """Setup experiment tracking and seeds."""
     all_configs = {}
