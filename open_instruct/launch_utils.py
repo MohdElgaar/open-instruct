@@ -1,6 +1,7 @@
 import os
 import subprocess
 
+from huggingface_hub.constants import HF_HUB_CACHE
 from transformers.utils import hub as transformers_hub
 
 AUTO_CREATED_BEAKER_CONFIG_DIR = "configs/beaker_configs/auto_created"
