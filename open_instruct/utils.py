@@ -1898,6 +1898,7 @@ class ModelDims:
     def from_hf_config(cls, model_name_or_path: str) -> "ModelDims":
         """Create ModelDims from a HuggingFace model name or path."""
         config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+        config = config.text_config if hasattr(config, "text_config") and config.text_config is not None else config
         hidden_size = config.hidden_size
         intermediate_size = getattr(config, "intermediate_size", 4 * hidden_size)
         sliding_window = getattr(config, "sliding_window", None)
