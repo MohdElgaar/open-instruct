@@ -1058,8 +1058,8 @@ def sft_tokenize_v1(
 ):
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key], return_dict=False)
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     row[LABELS_KEY] = labels
@@ -1073,8 +1073,8 @@ def sft_tokenize_mask_out_prompt_v1(
     """mask out the prompt tokens by manipulating labels"""
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
 
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key], return_dict=False)
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     labels[: len(row[INPUT_IDS_PROMPT_KEY])] = [-100] * len(row[INPUT_IDS_PROMPT_KEY])
@@ -1114,6 +1114,7 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
         truncation=True,
         max_length=max_seq_length,
         add_generation_prompt=False,
+        return_dict=False,
     )
     assert isinstance(input_ids_result, torch.Tensor)
     input_ids = input_ids_result
@@ -1133,6 +1134,7 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=False,
+                    return_dict=False,
                 ).shape[1]
             # next, we calculate the end index of this non-assistant message
             if message_idx < len(messages) - 1 and messages[message_idx + 1]["role"] == "assistant":
@@ -1147,6 +1149,7 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=True,
+                    return_dict=False,
                 ).shape[1]
             else:
                 # for the last message or the message that doesn't follow with an assistant message,
@@ -1159,6 +1162,7 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=False,
+                    return_dict=False,
                 ).shape[1]
             # set the label to -100 for the non-assistant part
             labels[:, message_start_idx:message_end_idx] = -100
@@ -1184,6 +1188,7 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
         truncation=True,
         max_length=max_seq_length,
         add_generation_prompt=False,
+        return_dict=False,
     )
     assert isinstance(input_ids_result, torch.Tensor)
     input_ids = input_ids_result
@@ -1203,6 +1208,7 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=False,
+                    return_dict=False,
                 ).shape[1]
             # next, we calculate the end index of this non-assistant message
             if message_idx < len(messages) - 1 and messages[message_idx + 1]["role"] == "assistant":
@@ -1217,6 +1223,7 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=True,
+                    return_dict=False,
                 ).shape[1]
             else:
                 # for the last message or the message that doesn't follow with an assistant message,
@@ -1229,6 +1236,7 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
                     truncation=True,
                     max_length=max_seq_length,
                     add_generation_prompt=False,
+                    return_dict=False,
                 ).shape[1]
             # set the label to -100 for the non-assistant part
             labels[:, message_start_idx:message_end_idx] = -100
@@ -1250,15 +1258,15 @@ def preference_tokenize_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer):
     prompt = row["chosen"][:-1]
 
     # Tokenize prompt
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
+    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
     row[ATTENTION_MASK_PROMPT_KEY] = [1] * len(row[INPUT_IDS_PROMPT_KEY])
 
     # Tokenize chosen completion
-    row[CHOSEN_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["chosen"])
+    row[CHOSEN_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["chosen"], return_dict=False)
     row[CHOSEN_ATTENTION_MASK_KEY] = [1] * len(row[CHOSEN_INPUT_IDS_KEY])
 
     # Tokenize rejected completion
-    row[REJECTED_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["rejected"])
+    row[REJECTED_INPUT_IDS_KEY] = tokenizer.apply_chat_template(row["rejected"], return_dict=False)
     row[REJECTED_ATTENTION_MASK_KEY] = [1] * len(row[REJECTED_INPUT_IDS_KEY])
 
     return row
@@ -1393,8 +1401,9 @@ def rlvr_tokenize_v1(
         prompt,
         add_generation_prompt=True,
         tools=tools_for_template,  # type: ignore[arg-type]
+        return_dict=False
     )
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key], return_dict=False)
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
     labels = copy.deepcopy(row[INPUT_IDS_KEY])
     row[LABELS_KEY] = labels
@@ -1413,8 +1422,8 @@ def rlvr_tokenize_v2(
     verifier_source_key: str = VERIFIER_SOURCE_KEY,
 ):
     prompt = row[sft_messages_key] if len(row[sft_messages_key]) == 1 else row[sft_messages_key][:-1]
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key])
+    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+    row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key], return_dict=False)
     # weird issue with qwen: sometimes the padding token ends up in the input ids?
     # ill look into this more later, for now this guard should be enough
     if tokenizer.pad_token_id in row[INPUT_IDS_KEY]:
@@ -1492,6 +1501,7 @@ def rlvr_tokenize_v3(
         prompt,
         add_generation_prompt=True,
         tools=tools_for_template,  # type: ignore[arg-type]
+        return_dict=False
     )
     if tokenizer.pad_token_id in row[INPUT_IDS_PROMPT_KEY]:
         row[INPUT_IDS_PROMPT_KEY] = [x for x in row[INPUT_IDS_PROMPT_KEY] if x != tokenizer.pad_token_id]
