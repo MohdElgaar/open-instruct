@@ -812,22 +812,8 @@ class LLMRayActor:
             self.check_background_threads()
             time.sleep(DRAIN_ACTIVE_TASKS_SLEEP_S)
         self._run_async(self.llm_engine.update_weights(WeightTransferUpdateRequest(**update_info)))
-        self._check_weights_for_nan()
         if model_step is not None:
             self.current_model_step = model_step
-
-    def _check_weights_for_nan(self) -> None:
-        def _check_nan(worker) -> list[str]:
-            nan_params = []
-            for name, param in worker.model_runner.model.named_parameters():
-                if torch.isnan(param.data).any():
-                    nan_params.append(name)
-            return nan_params
-
-        results = self._run_async(self.llm_engine.collective_rpc(_check_nan))
-        for i, nan_params in enumerate(results):
-            for name in nan_params:
-                logger.error(f"NaN in vLLM engine weight AFTER update (worker {i}): {name}")
 
     def reset_prefix_cache(self) -> None:
         return self._run_async(self.llm_engine.reset_prefix_cache())
