@@ -812,8 +812,16 @@ class LLMRayActor:
             self.check_background_threads()
             time.sleep(DRAIN_ACTIVE_TASKS_SLEEP_S)
         self._run_async(self.llm_engine.update_weights(WeightTransferUpdateRequest(**update_info)))
+        self._check_weights_for_nan()
         if model_step is not None:
             self.current_model_step = model_step
+
+    def _check_weights_for_nan(self) -> None:
+        model = self.llm_engine.engine.model_executor.driver_worker.model_runner.model
+        for name, param in model.named_parameters():
+            if torch.isnan(param.data).any():
+                logger.error(f"NaN in vLLM engine weight AFTER update: {name}")
+                return
 
     def reset_prefix_cache(self) -> None:
         return self._run_async(self.llm_engine.reset_prefix_cache())
@@ -1337,7 +1345,13 @@ def _prepare_params_for_sync(
     DS3 gathered tensors may be non-contiguous or views into temporary buffers.
     Cloning ensures we send independent, contiguous tensors over NCCL.
     """
-    return [(name_mapper(n) if name_mapper else n, p.data.contiguous().clone()) for n, p in params]
+    out: list[tuple[str, torch.Tensor]] = []
+    for n, p in params:
+        mapped = name_mapper(n) if name_mapper else n
+        if torch.isnan(p.data).any():
+            logger.error(f"NaN in trainer weight BEFORE send: {mapped}")
+        out.append((mapped, p.data.contiguous().clone()))
+    return out
 
 
 def _collect_weight_metadata(
