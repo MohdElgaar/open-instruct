@@ -1218,6 +1218,11 @@ def create_vllm_engines(
     trust_remote_code: bool = False,
     vllm_attention_backend: str | None = None,
 ) -> list[ray.actor.ActorHandle]:
+    if single_gpu_mode:
+        raise ValueError(
+            "single_gpu_mode is not yet supported with the native weight transfer API. "
+            "NCCL cannot have two ranks on the same CUDA device."
+        )
     vllm_engines = []
     # Use "mp" (multiprocessing) for TP > 1 when running inside a Ray actor.
     # Using "ray" executor causes placement group context loss in vLLM v1's
