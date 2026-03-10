@@ -445,6 +445,19 @@ async def _check_health(port: int) -> None:
             raise RuntimeError(f"vLLM server health check failed with status {response.status}")
 
 
+def _get_kv_cache_max_concurrency_for_worker(worker: Any) -> int:
+    """Compute KV-cache concurrency inside the worker to avoid spec deserialization over RPC."""
+    vllm_config = worker.vllm_config
+    gpu_memory_utilization = vllm_config.cache_config.gpu_memory_utilization
+    total_gpu_memory = torch.cuda.get_device_properties(0).total_memory
+    available_memory = int(gpu_memory_utilization * total_gpu_memory)
+    kv_cache_specs = worker.get_kv_cache_spec()
+    kv_cache_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs)
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    max_concurrency = kv_cache_utils.get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+    return int(max_concurrency)
+
+
 def _prefetch_worker(actor: "LLMRayActor") -> None:
     while True:
         if actor._should_stop() or len(actor.active_tasks) >= actor.inference_batch_size:
@@ -863,23 +876,10 @@ class LLMRayActor:
 
     def get_kv_cache_info(self) -> int:
         """Get KV cache max concurrency from the vLLM engine."""
-        kv_cache_specs = self._run_async(self.llm_engine.collective_rpc("get_kv_cache_spec"))
-
-        vllm_config = self.llm_engine.vllm_config
-        gpu_memory_utilization = vllm_config.cache_config.gpu_memory_utilization
-        total_gpu_memory = torch.cuda.get_device_properties(0).total_memory
-        # Consider using available_memory = int(worker.available_kv_cache_memory_bytes) instead.
-        available_memory = int(gpu_memory_utilization * total_gpu_memory)
-
-        kv_cache_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs[0])
-
-        kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-            vllm_config, kv_cache_groups, available_memory
+        max_concurrency_per_worker = self._run_async(
+            self.llm_engine.collective_rpc(_get_kv_cache_max_concurrency_for_worker)
         )
-
-        max_concurrency = kv_cache_utils.get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
-
-        return int(max_concurrency)
+        return int(min(max_concurrency_per_worker))
 
 
 def _register_tool_dispatch(
