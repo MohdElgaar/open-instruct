@@ -868,6 +868,7 @@ class LLMRayActor:
         vllm_config = self.llm_engine.vllm_config
         gpu_memory_utilization = vllm_config.cache_config.gpu_memory_utilization
         total_gpu_memory = torch.cuda.get_device_properties(0).total_memory
+        # Consider using available_memory = int(worker.available_kv_cache_memory_bytes) instead.
         available_memory = int(gpu_memory_utilization * total_gpu_memory)
 
         kv_cache_groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs[0])
