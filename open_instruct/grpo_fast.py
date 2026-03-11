@@ -462,7 +462,10 @@ class PolicyTrainerRayProcess(RayProcess):
                     yield name, param
 
             NCCLWeightTransferEngine.trainer_send_weights(
-                iterator=checked_iterator(), group=self.model_update_group, packed=self.args.gather_whole_model
+                iterator=checked_iterator(), trainer_args={
+                    "group": self.model_update_group,
+                    "packed": self.args.gather_whole_model,
+                }
             )
         else:
             for _ in iterator:
