@@ -76,7 +76,7 @@ from ray.util import queue as ray_queue
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from rich.pretty import pprint
-from transformers import AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizer, get_scheduler
+from transformers import AutoModelForCausalLM, AutoModelForMultimodalLM, PreTrainedModel, PreTrainedTokenizer, get_scheduler
 from transformers.integrations import HfDeepSpeedConfig
 from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
 
@@ -252,8 +252,13 @@ class PolicyTrainerRayProcess(RayProcess):
             micro_batch_size=args.per_device_train_batch_size,
             seq_length_is_variable=True,
         )
-        self.policy: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-            model_config.model_name_or_path,
+        model_name_or_path = model_config.model_name_or_path
+        model_cls = AutoModelForMultimodalLM if "Qwen3.5" in model_name_or_path else AutoModelForCausalLM
+        logger.info(
+            f"Loading policy model with {model_cls.__name__} for {model_name_or_path!r}"
+        )
+        self.policy: PreTrainedModel = model_cls.from_pretrained(
+            model_name_or_path,
             revision=model_config.model_revision,
             dtype=torch.bfloat16,
             attn_implementation=model_config.attn_implementation,
