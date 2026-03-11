@@ -157,7 +157,6 @@ def _build_data_prep_actor_resume_state(checkpoint_state: dict[str, Any] | None)
     resume_state["training_step"] = last_consumed_step + 1
     return resume_state
 
-
 CHECKPOINT_COMPLETE_MARKER = ".checkpoint_complete"
 WEIGHT_SYNC_TIMEOUT_S = 120.0
 CLUSTER_STARTUP_TIMEOUT_S = 1200.0
@@ -1440,13 +1439,21 @@ def create_model_and_optimizer(
     data_prep_actor_state = _build_data_prep_actor_resume_state(checkpoint_state)
     if data_prep_actor_state is not None:
         ray_get_with_progress(
-            [_data_prep_actor.set_state.remote(data_prep_actor_state)], desc="Restoring data prep actor state"
+            [_data_prep_actor.set_state.remote(data_prep_actor_state)],
+            desc="Restoring data prep actor state",
         )
         logger.info(
             "Restored data prep actor state from checkpoint "
             f"with training_step={data_prep_actor_state['training_step']}"
         )
     ray_get_with_progress([_data_prep_actor.start.remote()], desc="Starting data prep actor")
+
+    ray_get_with_progress(
+        [m.setup_model_update_group.remote(vllm_engines=vllm_engines) for m in policy_group.models],
+        desc="Setting up model update group",
+    )
+    logger.info("======== ✅ model update group setup successfully =========")
+
     return (
         policy_group,
         vllm_engines,
