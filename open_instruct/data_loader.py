@@ -1340,12 +1340,19 @@ class DataPreparationActor:
             )
 
         while self.training_step < self.num_training_steps:
+            if self.shutdown_requested:
+                return
             generation_idle_wait_start_time = time.perf_counter()
+            wait_count = 0
             while self.training_step - self._last_consumed_step > self.config.async_steps:
-                logger.info(
-                    f"[DataPreparationActor] Step {self.training_step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute."
-                )
+                if self.shutdown_requested:
+                    return
+                if (wait_count + 1) % 1000 == 0:
+                    logger.info(
+                        f"[DataPreparationActor] Step {self.training_step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute. Wait count: {wait_count}"
+                    )
                 time.sleep(0.1)
+                wait_count += 1
             generation_idle_wait_time = time.perf_counter() - generation_idle_wait_start_time
 
             logger.info(
