@@ -1103,13 +1103,16 @@ class DataPreparationActor:
             if self.shutdown_requested:
                 return
 
+            wait_count = 0
             while step - self._last_consumed_step > self.config.async_steps:
                 if self.shutdown_requested:
                     return
-                logger.info(
-                    f"[DataPreparationActor] Step {step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute."
-                )
+                if (wait_count + 1) % 1000 == 0:
+                    logger.info(
+                        f"[DataPreparationActor] Step {step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute. Wait count: {wait_count}"
+                    )
                 time.sleep(0.1)
+                wait_count += 1
 
             logger.info(
                 f"[DataPreparationActor] Step {step}: calling accumulate_inference_batches for {self.global_batch_size} prompts"
