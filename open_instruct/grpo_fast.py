@@ -1088,9 +1088,10 @@ def setup_runtime_variables(
             "/weka/oe-adapt-default/allennlp/deletable_open_instruct_dataset_cache"
         )
     args.world_size = sum(args.num_learners_per_node)
-    args.num_training_steps = args.total_episodes // (
-        streaming_config.num_unique_prompts_rollout * streaming_config.num_samples_per_prompt_rollout
-    )
+    if args.num_training_steps is None:
+        args.num_training_steps = args.total_episodes // (
+            streaming_config.num_unique_prompts_rollout * streaming_config.num_samples_per_prompt_rollout
+        )
     args.try_launch_beaker_eval_jobs_on_weka = args.try_launch_beaker_eval_jobs_on_weka and is_beaker_job()
     if args.push_to_hub:
         if args.hf_repo_id is None:  # auto-generate one
