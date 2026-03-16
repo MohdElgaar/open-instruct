@@ -2451,11 +2451,11 @@ class CountIncrementWordChecker(Instruction):
         A string representing the instruction description.
         """
         if not keyword1:
-            self._keyword1 = instructions_util.generate_keywords(num_keywords=1)
+            self._keyword1 = instructions_util.generate_keywords(num_keywords=1)[0]
         else:
             self._keyword1 = keyword1.strip()
         if not keyword2:
-            self._keyword2 = instructions_util.generate_keywords(num_keywords=1)
+            self._keyword2 = instructions_util.generate_keywords(num_keywords=1)[0]
         else:
             self._keyword2 = keyword2.strip()
 
