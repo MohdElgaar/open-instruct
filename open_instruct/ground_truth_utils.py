@@ -107,6 +107,11 @@ class MaxLengthVerifierConfig(VerifierConfig):
     max_length_verifier_max_length: int = 32768
 
 
+@dataclasses.dataclass
+class IFEvalVerifierConfig(VerifierConfig):
+    ifeval_reward_shaping: bool = False
+
+
 class VerifierFunction(ABC):
     """
     Base class for all verifier functions that evaluate model predictions against ground truth.
@@ -319,8 +324,13 @@ class IFEvalVerifier(VerifierFunction):
     """
 
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
-        super().__init__("ifeval", weight=1.0)
+        super().__init__("ifeval", weight=1.0, verifier_config=verifier_config)
         self.instruction_dict = ifeval_instructions_registry.INSTRUCTION_DICT
+        self.use_reward_shaping = bool(getattr(verifier_config, "ifeval_reward_shaping", False))
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        return IFEvalVerifierConfig
 
     def __call__(
         self,
@@ -366,6 +376,7 @@ class IFBenchVerifier(IFEvalVerifier, VerifierFunction):
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
         super(IFEvalVerifier, self).__init__("ifbench", weight=1.0)
         self.instruction_dict = ifbench_instructions_registry.INSTRUCTION_DICT
+        self.use_reward_shaping = bool(getattr(verifier_config, "ifeval_reward_shaping", False))
 
 
 class IFEvalVerifierOld(VerifierFunction):
