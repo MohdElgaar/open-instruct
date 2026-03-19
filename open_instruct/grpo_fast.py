@@ -1797,6 +1797,7 @@ def maybe_evaluate(
                 "Eval scores size %s is not divisible by eval_k %s; skipping pass@k metrics.", scores.size, eval_k
             )
         eval_metrics = {
+            "training_step": training_step,
             "eval/scores": scores.mean(),
             "eval/sequence_lengths": eval_sequence_lengths.mean(),
             "eval/sequence_lengths_min": eval_sequence_lengths.min(),
