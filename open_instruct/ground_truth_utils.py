@@ -26,7 +26,9 @@ from litellm import acompletion
 
 from open_instruct import context_window_checker, logger_utils
 from open_instruct.if_functions import IF_FUNCTIONS_MAP
+from open_instruct.IFEvalG import instructions as ifeval_instructions
 from open_instruct.IFEvalG import instructions_registry as ifeval_instructions_registry
+from open_instruct.IFEvalG import instructions_util as ifeval_instructions_util
 from open_instruct.IFBench import instructions_registry as ifbench_instructions_registry
 from open_instruct.judge_utils import EXTRACTOR_MAP, JUDGE_PROMPT_MAP, PRICE_PER_TOKEN, build_messages
 from open_instruct.math_utils import (
@@ -203,6 +205,209 @@ def remove_thinking_section(prediction: str) -> str:
     return prediction.strip()
 
 
+def _clamp_unit_interval(score: float) -> float:
+    return max(0.0, min(1.0, float(score)))
+
+
+def _score_exact_count(actual: int, target: int) -> float:
+    if target < 0:
+        return 0.0
+    if target == 0:
+        return float(actual == 0)
+    return _clamp_unit_interval(1.0 - abs(actual - target) / target)
+
+
+def _score_at_least_count(actual: int, minimum: int) -> float:
+    if minimum <= 0:
+        return 1.0
+    if actual >= minimum:
+        return 1.0
+    return _clamp_unit_interval(actual / minimum)
+
+
+def _score_less_than_count(actual: int, upper_bound: int) -> float:
+    if upper_bound <= 0:
+        return float(actual < upper_bound)
+    if actual < upper_bound:
+        return 1.0
+    return _clamp_unit_interval(1.0 - ((actual - upper_bound + 1) / upper_bound))
+
+
+def _score_at_most_count(actual: int, maximum: int) -> float:
+    if maximum < 0:
+        return 0.0
+    if actual <= maximum:
+        return 1.0
+    return _clamp_unit_interval(1.0 - ((actual - maximum) / max(maximum, 1)))
+
+
+def _score_relation_count(actual: int, target: int, relation: str) -> float:
+    if relation == "at least":
+        return _score_at_least_count(actual, target)
+    if relation == "less than":
+        return _score_less_than_count(actual, target)
+    raise ValueError(f"Unsupported comparison relation for reward shaping: {relation}")
+
+
+def _split_markdown_divider_paragraphs(value: str) -> list[str] | None:
+    paragraphs = re.split(r"\s?\*\*\*\s?", value)
+    valid_paragraphs = []
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph.strip():
+            valid_paragraphs.append(paragraph)
+        elif index != 0 and index != len(paragraphs) - 1:
+            return None
+    return valid_paragraphs
+
+
+def _split_double_newline_paragraphs(value: str) -> list[str] | None:
+    paragraphs = re.split(r"\n\n", value)
+    valid_paragraphs = []
+    for index, paragraph in enumerate(paragraphs):
+        if paragraph.strip():
+            valid_paragraphs.append(paragraph)
+        elif index != 0 and index != len(paragraphs) - 1:
+            return None
+    return valid_paragraphs
+
+
+def _score_ifeval_instruction(instruction_instance: object, answer: str) -> float | None:
+    """
+    Return a shaped reward for numeric/cardinality-style IFEval constraints.
+
+    Constraints without a natural notion of "almost correct" intentionally stay
+    binary and return None here so the verifier falls back to `check_following`.
+    """
+    if isinstance(instruction_instance, ifeval_instructions.NumberOfSentences):
+        actual = ifeval_instructions_util.count_sentences(answer)
+        return _score_relation_count(
+            actual,
+            instruction_instance._num_sentences_threshold,
+            instruction_instance._comparison_relation,
+        )
+
+    if isinstance(instruction_instance, ifeval_instructions.PlaceholderChecker):
+        actual = len(re.findall(r"\[.*?\]", answer))
+        return _score_at_least_count(actual, instruction_instance._num_placeholders)
+
+    if isinstance(instruction_instance, ifeval_instructions.BulletListChecker):
+        bullet_lists = re.findall(r"^\s*\*[^\*].*$", answer, flags=re.MULTILINE)
+        bullet_lists_2 = re.findall(r"^\s*-.*$", answer, flags=re.MULTILINE)
+        actual = len(bullet_lists) + len(bullet_lists_2)
+        return _score_exact_count(actual, instruction_instance._num_bullets)
+
+    if isinstance(instruction_instance, ifeval_instructions.HighlightSectionChecker):
+        num_highlights = 0
+        highlights = re.findall(r"\*[^\n\*]*\*", answer)
+        double_highlights = re.findall(r"\*\*[^\n\*]*\*\*", answer)
+        for highlight in highlights:
+            if highlight.strip("*").strip():
+                num_highlights += 1
+        for highlight in double_highlights:
+            if highlight.removeprefix("**").removesuffix("**").strip():
+                num_highlights += 1
+        return _score_at_least_count(num_highlights, instruction_instance._num_highlights)
+
+    if isinstance(instruction_instance, ifeval_instructions.SectionChecker):
+        pattern = r"\s?" + instruction_instance._section_spliter + r"\s?\d+\s?"
+        actual = len(re.split(pattern, answer)) - 1
+        return _score_at_least_count(actual, instruction_instance._num_sections)
+
+    if isinstance(instruction_instance, ifeval_instructions.ParagraphChecker):
+        paragraphs = _split_markdown_divider_paragraphs(answer)
+        if paragraphs is None:
+            return 0.0
+        return _score_exact_count(len(paragraphs), instruction_instance._num_paragraphs)
+
+    if isinstance(instruction_instance, ifeval_instructions.KeywordFrequencyChecker):
+        actual = len(re.findall(instruction_instance._keyword, answer, flags=re.IGNORECASE))
+        return _score_relation_count(actual, instruction_instance._frequency, instruction_instance._comparison_relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.NumberOfWords):
+        actual = ifeval_instructions_util.count_words(answer)
+        return _score_relation_count(actual, instruction_instance._num_words, instruction_instance._comparison_relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.ParagraphFirstWordCheck):
+        paragraphs = _split_double_newline_paragraphs(answer)
+        if paragraphs is None:
+            return 0.0
+
+        paragraph_score = _score_exact_count(len(paragraphs), instruction_instance._num_paragraphs)
+        if 1 <= instruction_instance._nth_paragraph <= len(paragraphs):
+            paragraph = paragraphs[instruction_instance._nth_paragraph - 1].strip()
+            if paragraph:
+                punctuation = {".", ",", "?", "!", "'", '"'}
+                word = paragraph.split()[0].strip().lstrip("'").lstrip('"')
+                first_word = ""
+                for letter in word:
+                    if letter in punctuation:
+                        break
+                    first_word += letter.lower()
+                first_word_score = float(first_word == instruction_instance._first_word)
+            else:
+                first_word_score = 0.0
+        else:
+            first_word_score = 0.0
+        return (paragraph_score + first_word_score) / 2
+
+    if isinstance(instruction_instance, ifeval_instructions.LetterFrequencyChecker):
+        actual = Counter(answer.lower())[instruction_instance._letter]
+        return _score_relation_count(actual, instruction_instance._frequency, instruction_instance._comparison_relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.CapitalWordFrequencyChecker):
+        words = ifeval_instructions_util.nltk.word_tokenize(answer)
+        actual = sum(word.isupper() for word in words)
+        return _score_relation_count(actual, instruction_instance._frequency, instruction_instance._comparison_relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.KeywordFrequencyOnceChecker):
+        actual = len(re.findall(instruction_instance._keyword, answer, flags=re.IGNORECASE))
+        return _score_exact_count(actual, 1)
+
+    if isinstance(instruction_instance, ifeval_instructions.KeywordFrequencyCheckerDifferent):
+        actual = len(re.findall(instruction_instance._keyword, answer, flags=re.IGNORECASE))
+        return _score_relation_count(actual, instruction_instance._frequency, instruction_instance._comparison_relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.ParagraphBasicChecker):
+        paragraphs = _split_markdown_divider_paragraphs(answer)
+        if paragraphs is None:
+            return 0.0
+        return _score_exact_count(len(paragraphs), 2)
+
+    if isinstance(instruction_instance, ifeval_instructions.ParagraphBasicChecker2):
+        paragraphs = _split_double_newline_paragraphs(answer)
+        if paragraphs is None:
+            return 0.0
+        return _score_exact_count(len(paragraphs), 2)
+
+    if isinstance(instruction_instance, ifeval_instructions.LowercaseCountingChecker):
+        actual = len(re.findall(r"\b[a-z]+\b", answer))
+        return _score_at_most_count(actual, instruction_instance._N)
+
+    if isinstance(instruction_instance, ifeval_instructions.LetterCountingChecker):
+        actual = len(re.findall(r"[a-zA-Z]", answer))
+        return _score_relation_count(actual, instruction_instance._N, instruction_instance._relation)
+
+    if isinstance(instruction_instance, ifeval_instructions.CountingCompositionChecker):
+        paragraphs = _split_markdown_divider_paragraphs(answer)
+        if paragraphs is None:
+            return 0.0
+
+        scores = [_score_exact_count(len(paragraphs), 3)]
+        for paragraph in paragraphs:
+            sentences = ifeval_instructions_util.split_into_sentences(paragraph)
+            scores.append(_score_exact_count(len(sentences), instruction_instance._n_sent))
+            for sentence in sentences:
+                actual_words = len(ifeval_instructions_util.nltk.word_tokenize(sentence))
+                scores.append(_score_exact_count(actual_words, instruction_instance._n_words))
+        return sum(scores) / len(scores)
+
+    if isinstance(instruction_instance, ifeval_instructions.CountIncrementWordChecker):
+        actual_1 = len(re.findall(instruction_instance._keyword1, answer, flags=re.IGNORECASE))
+        actual_2 = len(re.findall(instruction_instance._keyword2, answer, flags=re.IGNORECASE))
+        return (_score_exact_count(actual_1, 1) + _score_exact_count(actual_2, 2)) / 2
+    return None
+
+
 class GSM8KVerifier(VerifierFunction):
     """
     Verifier for GSM8K tasks that extracts the last number from the prediction
@@ -358,10 +563,16 @@ class IFEvalVerifier(VerifierFunction):
             instruction_cls = self.instruction_dict[instruction_key]
             instruction_instance = instruction_cls(instruction_key)
             instruction_instance.build_description(**args)
-            if prediction.strip() and instruction_instance.check_following(answer):
-                rewards.append(1.0)
+            if prediction.strip():
+                if self.use_reward_shaping and (shaped_reward:= _score_ifeval_instruction(instruction_instance, answer)):
+                    reward = shaped_reward
+                elif instruction_instance.check_following(answer):
+                    reward = 1.0
+                else:
+                    reward = 0.0
             else:
-                rewards.append(0.0)
+                reward = 0.0
+            rewards.append(reward)
         return VerificationResult(score=sum(rewards) / len(rewards))
 
 class IFBenchVerifier(IFEvalVerifier, VerifierFunction):
@@ -374,7 +585,7 @@ class IFBenchVerifier(IFEvalVerifier, VerifierFunction):
     """
 
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
-        super(IFEvalVerifier, self).__init__("ifbench", weight=1.0)
+        super(IFEvalVerifier, self).__init__("ifbench", weight=1.0, verifier_config=verifier_config)
         self.instruction_dict = ifbench_instructions_registry.INSTRUCTION_DICT
         self.use_reward_shaping = bool(getattr(verifier_config, "ifeval_reward_shaping", False))
 
