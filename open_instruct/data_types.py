@@ -41,6 +41,8 @@ class RequestInfo:
     tool_call_stats: list[list[ToolCallStats]] = field(default_factory=list)
     rollout_states: list[dict] = field(default_factory=list)
     """Per-sample rollout state dicts (rewards, step_count, done, info) — always present."""
+    training_steps: list[int | None] | None = None
+    is_eval: bool = False
 
 
 @dataclass
@@ -99,6 +101,7 @@ class PromptRequest:
     ground_truth: Any = None
     """Optional ground truth override (e.g. from evolving rubrics). When set, the vLLM
     engine uses this instead of looking up the ground truth from the dataset."""
+    training_step: int | None = None
 
 
 @dataclass

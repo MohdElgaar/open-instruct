@@ -363,6 +363,9 @@ def process_completed_request(request_id, outs, current_time, use_tools, request
         tool_calleds = [False] * len(response_ids)
         tool_call_stats = [[] for _ in response_ids]
 
+    ts = metadata.get("training_step")
+    training_steps = [ts] * len(response_ids)
+
     result = GenerationResult(
         responses=response_ids,
         finish_reasons=finish_reasons,
@@ -376,6 +379,8 @@ def process_completed_request(request_id, outs, current_time, use_tools, request
             tool_calleds=tool_calleds,
             tool_call_stats=tool_call_stats,
             rollout_states=rollout_states,
+            training_steps=training_steps,
+            is_eval=metadata["is_eval"],
         ),
         index=metadata["index"],
         prompt_id=metadata["prompt_id"],
@@ -472,6 +477,7 @@ def add_request(actor: "LLMRayActor", request: PromptRequest) -> None:
         "active_tools": request.active_tools,
         "env_config": request.env_config,
         "ground_truth": request.ground_truth,
+        "training_step": request.training_step,
     }
 
     for j in range(request.generation_config.n):
@@ -551,7 +557,6 @@ async def compute_rewards(actor: "LLMRayActor", result: GenerationResult, exampl
     k_ground_truths = [example[GROUND_TRUTHS_KEY]] * k
     k_datasets = [example[VERIFIER_SOURCE_KEY]] * k
     k_raw_queries = [example[RAW_PROMPT_KEY]] * k
-
     scores, metrics = await actor.reward_fn(
         result.responses,
         decoded_responses,

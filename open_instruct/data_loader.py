@@ -452,6 +452,10 @@ class StreamingDataLoaderConfig:
     verification_reward: float = 10.0
     remap_verifier: str | None = None
     ifeval_reward_shaping: bool = False
+    ifeval_reward_shaping_curriculum: bool = False
+    ifeval_competence_c0: float = 0.1
+    ifeval_competence_alpha: float = 1.0
+    ifeval_num_curriculum_steps: int = -1
 
     # Reward aggregation
     reward_aggregator: Literal["last", "sum"] = "last"
@@ -717,6 +721,7 @@ def add_prompt_to_generator(
     is_eval: bool,
     base_env_config: EnvConfig,
     ground_truth_overrides: dict[int, Any] | None = None,
+    training_step: int | None = None,
 ) -> None:
     index = int(example["index"])
 
@@ -735,6 +740,7 @@ def add_prompt_to_generator(
             active_tools=example.get(TOOLS_COLUMN_KEY),
             env_config=env_config,
             ground_truth=ground_truth,
+            training_step=None if is_eval else training_step,
         )
     )
 
@@ -797,6 +803,7 @@ def process_group(
             is_eval=False,
             base_env_config=base_env_config,
             ground_truth_overrides=ground_truth_overrides,
+            training_step=training_step,
         )
 
     for i in range(len(result.finish_reasons)):
@@ -866,6 +873,7 @@ def make_batch_from_groups(
     combined_tool_calleds = []
     combined_tool_call_stats = []
     combined_rollout_states = []
+    combined_training_steps: list[int | None] = []
     combined_logprobs = []
 
     earliest_start_time = float("inf")
@@ -901,6 +909,11 @@ def make_batch_from_groups(
         combined_tool_calleds.extend(result.request_info.tool_calleds)
         combined_tool_call_stats.extend(result.request_info.tool_call_stats)
         combined_rollout_states.extend(result.request_info.rollout_states)
+        n_resp = len(result.responses)
+        ts_list = result.request_info.training_steps
+        combined_training_steps.extend(
+            ts_list if ts_list is not None and len(ts_list) == n_resp else [None] * n_resp
+        )
 
         combined_logprobs.extend(result.logprobs)
 
@@ -931,6 +944,8 @@ def make_batch_from_groups(
         tool_calleds=combined_tool_calleds,
         tool_call_stats=combined_tool_call_stats,
         rollout_states=combined_rollout_states,
+        training_steps=combined_training_steps,
+        is_eval=groups[0].result.request_info.is_eval,
     )
 
     combined_result = data_types.GenerationResult(
@@ -1338,6 +1353,7 @@ class DataPreparationActor:
                 is_eval=False,
                 base_env_config=self.base_env_config,
                 ground_truth_overrides=self.ground_truth_overrides,
+                training_step=self.training_step,
             )
 
         while self.training_step < self.num_training_steps:
