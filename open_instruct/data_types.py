@@ -41,6 +41,8 @@ class RequestInfo:
     tool_call_stats: list[list[ToolCallStats]] = field(default_factory=list)
     rollout_states: list[dict] = field(default_factory=list)
     """Per-sample rollout state dicts (rewards, step_count, done, info) — always present."""
+    training_steps: list[int | None] | None = None
+    is_eval: bool = False
 
 
 @dataclass
@@ -95,6 +97,7 @@ class PromptRequest:
     active_tools: list[str] | None = None
     """List of tool names that are active for this sample. If None, all tools are active."""
     env_config: EnvConfig = field(default_factory=EnvConfig)
+    training_step: int | None = None
 
 
 @dataclass

@@ -112,6 +112,10 @@ class MaxLengthVerifierConfig(VerifierConfig):
 @dataclasses.dataclass
 class IFEvalVerifierConfig(VerifierConfig):
     ifeval_reward_shaping: bool = False
+    ifeval_reward_shaping_curriculum: bool = False
+    ifeval_competence_c0: float = 0.1
+    ifeval_competence_alpha: float = 1.0
+    ifeval_num_curriculum_steps: int = -1
 
 
 class VerifierFunction(ABC):
@@ -207,6 +211,35 @@ def remove_thinking_section(prediction: str) -> str:
 
 def _clamp_unit_interval(score: float) -> float:
     return max(0.0, min(1.0, float(score)))
+
+
+def competence(t: float, c0: float, alpha: float) -> float:
+    """competence c(t)."""
+    t = max(0.0, min(1.0, float(t)))
+    c0 = float(c0)
+    alpha = float(alpha)
+    inner = 1.0 - (1.0 - c0) * (1.0 - t)
+    inner = max(0.0, inner)
+    if alpha <= 0:
+        return min(1.0, inner)
+    return min(1.0, inner ** (1.0 / alpha))
+
+
+def ifeval_partial_credit_multiplier(
+    training_step: int | None,
+    num_curriculum_steps: int | None,
+    c0: float,
+    alpha: float,
+) -> float:
+    """Maps training progress to a multiplier in [0, 1] via (1 - c(t)) / (1 - c(0)); t clamps past num_curriculum_steps."""
+    if training_step is None or num_curriculum_steps is None or int(num_curriculum_steps) < 1:
+        return 1.0
+    N = max(int(num_curriculum_steps) - 1, 1)
+    t = min(1.0, max(0.0, (float(training_step) - 1.0) / N))
+    c = competence(t, c0, alpha)
+    c0_at_0 = competence(0.0, c0, alpha)
+    eps = 1e-9
+    return (1.0 - c) / max(1.0 - c0_at_0, eps)
 
 
 def _score_exact_count(actual: int, target: int) -> float:
@@ -553,6 +586,18 @@ class IFEvalVerifier(VerifierFunction):
         instruction_keys = constraint_dict["instruction_id"]
         args_list = constraint_dict["kwargs"]
         rewards = []
+        cfg = self.verifier_config
+        rs = rollout_state or {}
+        use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
+        if cfg.ifeval_reward_shaping_curriculum:
+            mult = ifeval_partial_credit_multiplier(
+                rs.get("training_step"),
+                cfg.ifeval_num_curriculum_steps,
+                cfg.ifeval_competence_c0,
+                cfg.ifeval_competence_alpha,
+            )
+        else:
+            mult = 1.0
         if len(prediction) == 0 or len(answer) == 0:
             logger.warning("Empty prediction received for IFEvalVerifier.")
             return VerificationResult(score=0.0)
@@ -564,10 +609,14 @@ class IFEvalVerifier(VerifierFunction):
             instruction_instance = instruction_cls(instruction_key)
             instruction_instance.build_description(**args)
             if prediction.strip():
-                if self.use_reward_shaping and (shaped_reward:= _score_ifeval_instruction(instruction_instance, answer)):
-                    reward = shaped_reward
-                elif instruction_instance.check_following(answer):
+                if instruction_instance.check_following(answer):
                     reward = 1.0
+                elif use_shaping:
+                    shaped = _score_ifeval_instruction(instruction_instance, answer)
+                    if shaped is not None:
+                        reward = shaped * mult if use_curriculum else shaped
+                    else:
+                        reward = 0.0
                 else:
                     reward = 0.0
             else:
@@ -1586,7 +1635,20 @@ class RewardConfig:
             tool_errors = infos.tool_errors
             tool_outputs = infos.tool_outputs
             tool_calleds = infos.tool_calleds
-            rollout_states = infos.rollout_states or [{}] * len(decoded_responses)
+            n = len(decoded_responses)
+            base_rollout_states = infos.rollout_states or [{}] * n
+            ts_list = infos.training_steps
+            if ts_list is None:
+                ts_list = [None] * n
+            is_eval_flag = infos.is_eval
+            rollout_states = [
+                {
+                    **(base_rollout_states[i]),
+                    "training_step": ts_list[i] if i < len(ts_list) else None,
+                    "is_eval": is_eval_flag,
+                }
+                for i in range(n)
+            ]
             good_outputs = [
                 len(tool_outputs[i]) > 0 and tool_calleds[i] and not timeouts[i] and not tool_errors[i]
                 for i in range(len(tool_outputs))

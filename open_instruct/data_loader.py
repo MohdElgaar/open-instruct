@@ -353,6 +353,10 @@ class StreamingDataLoaderConfig:
     verification_reward: float = 10.0
     remap_verifier: str | None = None
     ifeval_reward_shaping: bool = False
+    ifeval_reward_shaping_curriculum: bool = False
+    ifeval_competence_c0: float = 0.1
+    ifeval_competence_alpha: float = 1.0
+    ifeval_num_curriculum_steps: int = -1
 
     # Reward aggregation
     reward_aggregator: Literal["last", "sum"] = "last"
@@ -612,6 +616,7 @@ def add_prompt_to_generator(
     generation_config,
     is_eval: bool,
     base_env_config: EnvConfig,
+    training_step: int | None = None,
 ) -> None:
     index = int(example["index"])
 
@@ -627,6 +632,7 @@ def add_prompt_to_generator(
             is_eval=is_eval,
             active_tools=example.get(TOOLS_COLUMN_KEY),
             env_config=env_config,
+            training_step=None if is_eval else training_step,
         )
     )
 
@@ -735,6 +741,7 @@ def accumulate_inference_batches(
                 generation_config,
                 is_eval=False,
                 base_env_config=base_env_config,
+                training_step=training_step,
             )
 
         for i in range(len(result.finish_reasons)):
@@ -810,6 +817,7 @@ def accumulate_inference_batches(
     combined_tool_calleds = []
     combined_tool_call_stats = []
     combined_rollout_states = []
+    combined_training_steps: list[int | None] = []
     combined_logprobs = []
 
     earliest_start_time = float("inf")
@@ -832,6 +840,11 @@ def accumulate_inference_batches(
         combined_tool_calleds.extend(result.request_info.tool_calleds)
         combined_tool_call_stats.extend(result.request_info.tool_call_stats)
         combined_rollout_states.extend(result.request_info.rollout_states)
+        n_resp = len(result.responses)
+        ts_list = result.request_info.training_steps
+        combined_training_steps.extend(
+            ts_list if ts_list is not None and len(ts_list) == n_resp else [None] * n_resp
+        )
 
         combined_logprobs.extend(result.logprobs)
 
@@ -862,6 +875,8 @@ def accumulate_inference_batches(
         tool_calleds=combined_tool_calleds,
         tool_call_stats=combined_tool_call_stats,
         rollout_states=combined_rollout_states,
+        training_steps=combined_training_steps,
+        is_eval=results[0].request_info.is_eval,
     )
 
     combined_result = data_types.GenerationResult(
@@ -1098,6 +1113,7 @@ class DataPreparationActor:
                 self.generation_config,
                 is_eval=False,
                 base_env_config=self.base_env_config,
+                training_step=self.training_step,
             )
 
         for step in range(self.training_step, self.num_training_steps):

@@ -2417,6 +2417,11 @@ def main(
     # We don't care if we ever hit the max, so we let the queue be unbounded.
     evaluation_inference_results_Q = ray_queue.Queue()
 
+    nc = streaming_config.ifeval_num_curriculum_steps
+    if nc is None or nc < 0:
+        nc = args.num_training_steps
+    streaming_config.ifeval_num_curriculum_steps = min(int(nc), int(args.num_training_steps))
+
     reward_config = RewardConfig(
         apply_r1_style_format_reward=streaming_config.apply_r1_style_format_reward,
         r1_style_format_reward=streaming_config.r1_style_format_reward,
