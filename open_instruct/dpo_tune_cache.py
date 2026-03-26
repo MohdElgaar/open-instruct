@@ -168,9 +168,7 @@ def main(args: dpo_utils.ExperimentConfig, tc: TokenizerConfig):
     args.local_cache_dir = os.path.abspath(args.local_cache_dir)
     if is_beaker_job():
         args.local_cache_dir = "/weka/oe-adapt-default/allennlp/deletable_open_instruct_dataset_cache"
-    beaker_config = None
-    if is_beaker_job() and accelerator.is_main_process:
-        beaker_config = maybe_get_beaker_config()
+    beaker_config = maybe_get_beaker_config() if accelerator.is_main_process else None
 
     if args.push_to_hub and accelerator.is_main_process:
         if args.hf_repo_id is None:  # auto-generate one
@@ -744,7 +742,6 @@ def main(args: dpo_utils.ExperimentConfig, tc: TokenizerConfig):
             oe_eval_max_length=args.oe_eval_max_length,
             wandb_url=wandb_tracker.run.url if args.with_tracking else None,
             oe_eval_tasks=args.oe_eval_tasks,
-            gs_bucket_path=args.gs_bucket_path,
             eval_workspace=args.eval_workspace,
             eval_priority=args.eval_priority,
             oe_eval_gpu_multiplier=args.oe_eval_gpu_multiplier,

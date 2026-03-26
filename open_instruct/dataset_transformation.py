@@ -1725,6 +1725,8 @@ def get_dataset_v1(dc: DatasetConfig, tc: TokenizerConfig):
             desc=f"Normalizing {ENV_CONFIG_KEY} for {dc.dataset_name}",
         )
 
+    tc_dict = {k: v for k, v in asdict(tc).items() if v is not None}
+    tc_json = json.dumps(tc_dict, sort_keys=True)
     for fn_name, fn_args in zip(dc.transform_fn, dc.transform_fn_args):
         fn, fn_type = TRANSFORM_FNS[fn_name]
         # always pass in tokenizer and other args if needed
@@ -1735,7 +1737,7 @@ def get_dataset_v1(dc: DatasetConfig, tc: TokenizerConfig):
         # HuggingFace's internal .map() cache when transformation logic changes significantly
         tc_dict = {k: v for k, v in asdict(tc).items() if v is not None}
         new_fingerprint = hashlib.sha256(
-            f"{DATASET_CACHE_VERSION}:{fn_name}:{dataset._fingerprint}:{json.dumps(fn_args, sort_keys=True)}:{json.dumps(tc_dict, sort_keys=True)}".encode()
+            f"{DATASET_CACHE_VERSION}:{fn_name}:{dataset._fingerprint}:{json.dumps(fn_args, sort_keys=True)}:{tc_json}".encode()
         ).hexdigest()[:16]
 
         # perform the transformation
