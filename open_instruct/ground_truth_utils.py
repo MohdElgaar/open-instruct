@@ -615,7 +615,7 @@ class IFEvalVerifier(VerifierFunction):
                 elif use_shaping:
                     shaped = _score_ifeval_instruction(instruction_instance, answer)
                     if shaped is not None:
-                        reward = shaped * mult if use_curriculum else shaped
+                        reward = shaped * mult if cfg.ifeval_reward_shaping_curriculum else shaped
                     else:
                         reward = 0.0
                 else:
