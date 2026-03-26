@@ -26,8 +26,10 @@ dependencies = [
     "setuptools>=75.6.0,<80.0.0",
     "tensorboard>=2.18.0",
     "torch>=2.10.0,<2.11",
-    "transformers>=4.57.0",
-    "vllm==0.17.1; platform_system != 'Darwin'",
+    "torchvision>=0.25.0,<0.26; platform_system == 'Linux'",
+    "torchaudio>=2.10.0,<2.11; platform_system == 'Linux'",
+    "transformers",
+    "vllm",
     "wandb==0.23.1",
     "langdetect==1.0.9",
     "immutabledict==1.2.0",
@@ -62,8 +64,20 @@ torch = [
   { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine != 'aarch64'"},
   { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine == 'aarch64'"},
 ]
+torchvision = [
+  { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine != 'aarch64'"},
+  { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine == 'aarch64'"},
+]
+torchaudio = [
+  { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine != 'aarch64'"},
+  { index = "pytorch-cu130", marker = "platform_system == 'Linux' and platform_machine == 'aarch64'"},
+]
 flash-attn-3 = [
   { index = "flash-attn-3-wheels", marker = "platform_system == 'Linux' and platform_machine == 'x86_64'" },
+]
+vllm = [
+  { index = "vllm-nightly-cu130", marker = "platform_system == 'Linux' and platform_machine != 'aarch64'"},
+  { index = "vllm-nightly-cu130", marker = "platform_system == 'Linux' and platform_machine == 'aarch64'"},
 ]
 
 [[tool.uv.index]]
@@ -88,7 +102,7 @@ explicit = true
 
 [[tool.uv.index]]
 name = "flash-attn-3-wheels"
-url = "https://windreamer.github.io/flash-attention3-wheels/cu129_torch2100"
+url = "https://windreamer.github.io/flash-attention3-wheels/cu130_torch2100"
 format = "flat"
 explicit = true
 

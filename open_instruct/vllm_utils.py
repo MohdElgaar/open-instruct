@@ -27,6 +27,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from concurrent import futures
+from datetime import timedelta
 from typing import Any
 
 import aiohttp
@@ -34,7 +35,6 @@ import backoff
 import datasets
 import deepspeed
 import openai
-from packaging.version import Version
 import ray
 import torch
 import torch.distributed
@@ -801,11 +801,41 @@ class LLMRayActor:
             [future.result() for future in done]
             finalize_futures = list(not_done)
 
-    def init_weight_transfer_engine(self, request: dict) -> None:
-        request = WeightTransferInitRequest(**request)
-        return self._run_async(self.llm_engine.init_weight_transfer_engine(request))
+    def init_process_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        backend: str,
+        use_ray: bool = False,
+        timeout_minutes: int = 120,
+    ) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            self.llm_engine.collective_rpc(
+                "init_process_group",
+                args=(
+                    master_address,
+                    master_port,
+                    rank_offset,
+                    world_size,
+                    group_name,
+                    backend,
+                    use_ray,
+                    timeout_minutes,
+                ),
+            ),
+            self.loop,
+        )
+        return future.result(timeout=timeout_minutes * 60)
 
-    def update_weights(self, request: dict) -> None:
+    def _run_async(self, coro: Awaitable[Any]) -> Any:
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return future.result()
+
+    def _prepare_weight_update(self, name: str, dtype: str) -> None:
+        # Wait for all active requests to complete.
         while not self.inflight_updates and len(self.active_tasks) > 0:
             self.check_background_threads()
             time.sleep(DRAIN_ACTIVE_TASKS_SLEEP_S)
@@ -1209,11 +1239,6 @@ def create_vllm_engines(
     eval_dataset=None,
     vllm_dtype: str = "bfloat16",
 ) -> list[ray.actor.ActorHandle]:
-    if single_gpu_mode:
-        raise ValueError(
-            "single_gpu_mode is not yet supported with the native weight transfer API. "
-            "NCCL cannot have two ranks on the same CUDA device."
-        )
     vllm_engines = []
     # Use "mp" (multiprocessing) for TP > 1 when running inside a Ray actor.
     # Using "ray" executor causes placement group context loss in vLLM v1's
@@ -1262,7 +1287,6 @@ def create_vllm_engines(
                         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
                         "TORCH_CUDA_ARCH_LIST": get_cuda_arch_list(),
                         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
-                        "NCCL_CUMEM_ENABLE": "0",
                     }
                 ),
             )
@@ -1271,7 +1295,7 @@ def create_vllm_engines(
                 revision=revision,
                 tokenizer=tokenizer_name_or_path,
                 tokenizer_revision=revision,
-                weight_transfer_config=WeightTransferConfig(),
+                worker_extension_cls="open_instruct.vllm_utils_workerwrap.WorkerWrap",
                 tensor_parallel_size=tensor_parallel_size,
                 enforce_eager=enforce_eager,
                 dtype=vllm_dtype,

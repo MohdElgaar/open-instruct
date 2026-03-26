@@ -984,15 +984,27 @@ def is_beaker_job() -> bool:
 def configure_hf_hub_retry(total: int = 5, backoff_factor: float = 1) -> None:
     """Configure HF Hub HTTP retries with exponential backoff on 429/5xx."""
 
-    def backend_factory() -> requests.Session:
-        session = requests.Session()
-        retries = Retry(total=total, backoff_factor=backoff_factor, status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retries)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        return session
+    configure_http_backend = getattr(huggingface_hub, "configure_http_backend", None)
+    if configure_http_backend is not None:
+        # huggingface_hub<1.0: requests-based backend
+        def backend_factory() -> requests.Session:
+            session = requests.Session()
+            retries = Retry(total=total, backoff_factor=backoff_factor, status_forcelist=[429, 500, 502, 503, 504])
+            adapter = HTTPAdapter(max_retries=retries)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            return session
 
-    huggingface_hub.configure_http_backend(backend_factory=backend_factory)
+        configure_http_backend(backend_factory=backend_factory)
+        return
+
+    # huggingface_hub>=1.0 removed configure_http_backend (httpx + internal http_backoff).
+    logger.debug(
+        "configure_hf_hub_retry: configure_http_backend not available (huggingface_hub>=1.0); "
+        "Hub client already retries 429/5xx via http_backoff. Ignoring total=%s backoff_factor=%s.",
+        total,
+        backoff_factor,
+    )
 
 
 def ensure_hf_repo_cached(repo_id: str, revision: str | None = None) -> None:
