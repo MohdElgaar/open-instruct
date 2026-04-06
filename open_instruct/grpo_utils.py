@@ -188,8 +188,14 @@ class GRPOExperimentConfig(
     """The revision of the saved model in the Hugging Face Hub (can be autoset if not given)"""
     hf_repo_url: str | None = None
     """The url of the saved model in the Hugging Face Hub (will be autoset)"""
+    output_dir: str = "output"
+    """Where to save the model"""
+    metrics_jsonl_path: str | None = None
+    """Optional path to append structured JSONL metrics for each step/eval event."""
     cache_dataset_only: bool = False
     """Immediately exit after caching the dataset"""
+    save_final_model: bool = True
+    """Whether to save the final model checkpoint at the end of training."""
     keep_last_n_checkpoints: int = -1
     """How many checkpoints to keep in the output directory. -1 for all."""
     checkpoint_state_freq: int = 200
