@@ -161,7 +161,7 @@ class ExperimentConfig:
     """Where to save the model"""
     cache_dataset_only: bool = False
     """Immediately exit after caching the dataset"""
-    keep_last_n_checkpoints: int = 3
+    keep_last_n_checkpoints: int = -1
     """How many checkpoints to keep in the output directory. -1 for all."""
     checkpoint_state_freq: int = -1
     """How often to save the model checkpoint, optimizer states, and lr scheduler states (in steps)"""
