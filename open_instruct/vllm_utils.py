@@ -523,7 +523,16 @@ def accumulate_completions(actor: "LLMRayActor", sub_request: dict) -> futures.F
     actor.request_outputs[base_request_id]["outputs"].append(sub_request["request_output"])
 
     if len(actor.request_outputs[base_request_id]["outputs"]) == expected_n:
-        return asyncio.run_coroutine_threadsafe(finalize_completed_request(actor, base_request_id), actor.loop)
+        future = asyncio.run_coroutine_threadsafe(finalize_completed_request(actor, base_request_id), actor.loop)
+
+        def _log_finalize_exception(done_future: futures.Future) -> None:
+            try:
+                done_future.result()
+            except Exception:
+                logger.exception("Failed to finalize completed request %s", base_request_id)
+
+        future.add_done_callback(_log_finalize_exception)
+        return future
 
     return None
 
