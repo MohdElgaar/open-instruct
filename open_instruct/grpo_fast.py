@@ -29,6 +29,7 @@
 # limitations under the License.
 # isort: off
 import contextlib
+import json
 import os
 import pathlib
 from concurrent import futures
@@ -131,6 +132,40 @@ from open_instruct.utils import (
 )
 
 logger = logger_utils.setup_logger(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return _json_safe(value.item())
+        return None
+    if isinstance(value, pathlib.Path):
+        return str(value)
+    if isinstance(value, tuple | list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    return None
+
+
+def emit_metrics_record(path: str | None, kind: str, **record: Any) -> None:
+    if not path:
+        return
+
+    payload = {"kind": kind, "timestamp": time.time()}
+    payload.update({key: _json_safe(value) for key, value in record.items()})
+
+    path_obj = pathlib.Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    with path_obj.open("a", encoding="utf-8") as f:
+        json.dump(payload, f, sort_keys=True)
+        f.write("\n")
 
 
 def _build_data_prep_actor_resume_state(checkpoint_state: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1692,6 +1727,13 @@ def one_training_step(
     # Print only scalar metrics
     scalar_metrics = {k: v for k, v in metrics.items() if isinstance(v, float | int)}
     print_rich_single_line_metrics(scalar_metrics)
+    emit_metrics_record(
+        args.metrics_jsonl_path,
+        "step",
+        training_step=training_step,
+        episode=episode,
+        metrics=scalar_metrics,
+    )
 
     if args.with_tracking:
         # Convert array/list metrics to wandb histograms for logging
@@ -1818,6 +1860,13 @@ def maybe_evaluate(
             wandb.log(eval_metrics, step=training_step)
         else:
             print_rich_table(df.iloc[:1])
+        emit_metrics_record(
+            args.metrics_jsonl_path,
+            "eval",
+            training_step=training_step,
+            episode=episode,
+            metrics=eval_metrics,
+        )
         del table
         return True
     except Empty:
@@ -2161,7 +2210,10 @@ def run_training(
     if resume_training_step > args.num_training_steps:
         raise ValueError(f"Training didn't run since {resume_training_step=} > {args.num_training_steps=}")
 
-    save_final_model(args, policy_group, tokenizer, training_step, wandb_url, tc.chat_template_name)
+    if args.save_final_model:
+        save_final_model(args, policy_group, tokenizer, training_step, wandb_url, tc.chat_template_name)
+    else:
+        logger.info("Skipping final model save because save_final_model is disabled")
 
 
 def _discover_tools_from_datasets(dataset_mixer_list: list[str], dataset_mixer_list_splits: list[str]) -> set[str]:
@@ -2320,6 +2372,20 @@ def main(
     tokenizer = make_tokenizer(tc, model_config)
     args = setup_runtime_variables(args, streaming_config, tools_config)
     validate_configs(streaming_config, vllm_config, tuple(args.num_learners_per_node), args.sequence_parallel_size)
+    emit_metrics_record(
+        args.metrics_jsonl_path,
+        "run_info",
+        exp_name=args.exp_name,
+        run_name=args.run_name,
+        model_name=model_config.model_name_or_path,
+        learning_rate=args.learning_rate,
+        num_learners_per_node=args.num_learners_per_node,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        vllm_num_engines=vllm_config.vllm_num_engines,
+        vllm_tensor_parallel_size=vllm_config.vllm_tensor_parallel_size,
+        num_training_steps=args.num_training_steps,
+        output_dir=args.output_dir,
+    )
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -2496,7 +2562,20 @@ def main(
 
         if args.push_to_hub and (not dist.is_initialized() or dist.get_rank() == 0):
             push_folder_to_hub(args.output_dir, args.hf_repo_id, args.hf_repo_revision)
+        emit_metrics_record(
+            args.metrics_jsonl_path,
+            "run_status",
+            status="success",
+            output_dir=args.output_dir,
+        )
     except Exception as e:
+        emit_metrics_record(
+            args.metrics_jsonl_path,
+            "run_status",
+            status="failure",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         if args.send_slack_alerts:
             utils.send_slack_message(f"<!here> A RL job has died. Error message: {e}.")
         raise
