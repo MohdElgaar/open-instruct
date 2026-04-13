@@ -9,8 +9,10 @@ import ast
 import asyncio
 import copy
 import dataclasses
+import difflib
 import json
 import logging
+import math
 import os
 import re
 import string
@@ -38,6 +40,7 @@ from open_instruct.math_utils import (
     last_boxed_only_string,
     normalize_final_answer,
     remove_boxed,
+    strip_string,
 )
 from open_instruct.rubrics import RUBRIC_SCORING_PROMPT
 from open_instruct.rubrics.run_utils import extract_json_from_response, run_litellm_async
@@ -116,6 +119,28 @@ class IFEvalVerifierConfig(VerifierConfig):
     ifeval_competence_c0: float = 0.1
     ifeval_competence_alpha: float = 1.0
     ifeval_num_curriculum_steps: int = -1
+
+
+@dataclasses.dataclass
+class MathVerifierConfig(VerifierConfig):
+    """Config for RLVR-MATH-style verifiable rewards (see allenai/RLVR-MATH)."""
+
+    math_reward_shaping: bool = False
+    math_reward_shaping_curriculum: bool = False
+    math_competence_c0: float = 0.1
+    math_competence_alpha: float = 1.0
+    math_num_curriculum_steps: int = -1
+
+
+@dataclasses.dataclass
+class GSMVerifierConfig(VerifierConfig):
+    """Config for RLVR-GSM / GSM8K-style verifiable rewards (see allenai/RLVR-GSM)."""
+
+    gsm_reward_shaping: bool = False
+    gsm_reward_shaping_curriculum: bool = False
+    gsm_competence_c0: float = 0.1
+    gsm_competence_alpha: float = 1.0
+    gsm_num_curriculum_steps: int = -1
 
 
 class VerifierFunction(ABC):
@@ -240,6 +265,50 @@ def ifeval_partial_credit_multiplier(
     c0_at_0 = competence(0.0, c0, alpha)
     eps = 1e-9
     return (1.0 - c) / max(1.0 - c0_at_0, eps)
+
+
+def _gsm_shaped_score(extracted: str, label: str) -> float:
+    """Partial credit for numeric GSM answers: 1 - min(1, relative error) when both parse as finite floats."""
+    try:
+        e = float(str(extracted).replace(",", ""))
+        g = float(str(label).replace(",", ""))
+    except ValueError:
+        return 0.0
+    if not (math.isfinite(e) and math.isfinite(g)):
+        return 0.0
+    if g == 0.0:
+        return 1.0 if e == 0.0 else max(0.0, 1.0 - min(1.0, abs(e)))
+    rel = abs(e - g) / abs(g)
+    return max(0.0, 1.0 - min(1.0, rel))
+
+
+def _math_shaped_score_for_candidate(candidate: str, label: str) -> float:
+    """
+    Partial credit when symbolic equality fails: combine string similarity (stripped LaTeX)
+    and relative error when both sides normalize to finite floats.
+    """
+    best = 0.0
+    try:
+        s1 = strip_string(candidate)
+        s2 = strip_string(label)
+        if s1 or s2:
+            best = max(best, difflib.SequenceMatcher(None, s1, s2).ratio())
+    except Exception:
+        pass
+    try:
+        c = normalize_final_answer(candidate)
+        l = normalize_final_answer(label)
+        fc = float(c.replace(",", ""))
+        fl = float(l.replace(",", ""))
+        if math.isfinite(fc) and math.isfinite(fl):
+            if fl == 0.0:
+                num = 1.0 if fc == 0.0 else max(0.0, 1.0 - min(1.0, abs(fc)))
+            else:
+                num = max(0.0, 1.0 - min(1.0, abs(fc - fl) / abs(fl)))
+            best = max(best, num)
+    except (ValueError, TypeError, ZeroDivisionError):
+        pass
+    return _clamp_unit_interval(best)
 
 
 def _score_exact_count(actual: int, target: int) -> float:
@@ -448,7 +517,16 @@ class GSM8KVerifier(VerifierFunction):
     """
 
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
-        super().__init__("gsm8k", verifier_config=verifier_config, weight=1.0)
+        super().__init__(
+            "gsm8k",
+            verifier_config=verifier_config or GSMVerifierConfig(),
+            weight=1.0,
+        )
+        self.use_reward_shaping = bool(getattr(self.verifier_config, "gsm_reward_shaping", False))
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        return GSMVerifierConfig
 
     def __call__(
         self,
@@ -458,12 +536,28 @@ class GSM8KVerifier(VerifierFunction):
         query: str | None = None,
         rollout_state: dict | None = None,
     ) -> VerificationResult:
+        cfg = self.verifier_config
+        rs = rollout_state or {}
         response = re.sub(r"(\d),(\d)", r"\1\2", prediction)
         # Preserve explicit signs on both decimals and integers when extracting the final answer.
         numbers = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", response)
         extracted = numbers[-1] if numbers else response
-        score = float(str(extracted).lower() == str(label).lower())
-        return VerificationResult(score=score)
+        exact = str(extracted).lower() == str(label).lower()
+        if exact:
+            return VerificationResult(score=1.0)
+        use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
+        if not use_shaping:
+            return VerificationResult(score=0.0)
+        shaped = _gsm_shaped_score(extracted, label)
+        if cfg.gsm_reward_shaping_curriculum:
+            mult = ifeval_partial_credit_multiplier(
+                rs.get("training_step"),
+                cfg.gsm_num_curriculum_steps,
+                cfg.gsm_competence_c0,
+                cfg.gsm_competence_alpha,
+            )
+            return VerificationResult(score=shaped * mult)
+        return VerificationResult(score=shaped)
 
 
 class MathVerifier(VerifierFunction):
@@ -475,7 +569,16 @@ class MathVerifier(VerifierFunction):
     """
 
     def __init__(self, verifier_config: VerifierConfig | None = None) -> None:
-        super().__init__("math", verifier_config=verifier_config, weight=1.0)
+        super().__init__(
+            "math",
+            verifier_config=verifier_config or MathVerifierConfig(),
+            weight=1.0,
+        )
+        self.use_reward_shaping = bool(getattr(self.verifier_config, "math_reward_shaping", False))
+
+    @classmethod
+    def get_config_class(cls) -> type:
+        return MathVerifierConfig
 
     def __call__(
         self,
@@ -485,6 +588,8 @@ class MathVerifier(VerifierFunction):
         query: str | None = None,
         rollout_state: dict | None = None,
     ) -> VerificationResult:
+        cfg = self.verifier_config
+        rs = rollout_state or {}
         raw_answer = prediction
         all_answers = []
 
@@ -520,7 +625,19 @@ class MathVerifier(VerifierFunction):
         for answer in all_answers:
             if is_equiv(answer, label) or hendrycks_is_equiv(answer, label):
                 return VerificationResult(score=1.0)
-        return VerificationResult(score=0.0)
+        use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
+        if not use_shaping:
+            return VerificationResult(score=0.0)
+        shaped = max(_math_shaped_score_for_candidate(a, label) for a in all_answers)
+        if cfg.math_reward_shaping_curriculum:
+            mult = ifeval_partial_credit_multiplier(
+                rs.get("training_step"),
+                cfg.math_num_curriculum_steps,
+                cfg.math_competence_c0,
+                cfg.math_competence_alpha,
+            )
+            return VerificationResult(score=shaped * mult)
+        return VerificationResult(score=shaped)
 
 
 class StrictMathVerifier(VerifierFunction):

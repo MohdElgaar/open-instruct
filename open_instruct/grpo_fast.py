@@ -2460,6 +2460,12 @@ def main(
         nc = args.num_training_steps
     streaming_config.ifeval_num_curriculum_steps = min(int(nc), int(args.num_training_steps))
 
+    for _field in ("math_num_curriculum_steps", "gsm_num_curriculum_steps"):
+        nc_m = getattr(streaming_config, _field)
+        if nc_m is None or nc_m < 0:
+            nc_m = args.num_training_steps
+        setattr(streaming_config, _field, min(int(nc_m), int(args.num_training_steps)))
+
     reward_config = RewardConfig(
         apply_r1_style_format_reward=streaming_config.apply_r1_style_format_reward,
         r1_style_format_reward=streaming_config.r1_style_format_reward,

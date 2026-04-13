@@ -447,6 +447,18 @@ class StreamingDataLoaderConfig:
     ifeval_competence_alpha: float = 1.0
     ifeval_num_curriculum_steps: int = -1
 
+    # RLVR-MATH / RLVR-GSM reward shaping (see allenai/RLVR-MATH, allenai/RLVR-GSM)
+    math_reward_shaping: bool = False
+    math_reward_shaping_curriculum: bool = False
+    math_competence_c0: float = 0.1
+    math_competence_alpha: float = 1.0
+    math_num_curriculum_steps: int = -1
+    gsm_reward_shaping: bool = False
+    gsm_reward_shaping_curriculum: bool = False
+    gsm_competence_c0: float = 0.1
+    gsm_competence_alpha: float = 1.0
+    gsm_num_curriculum_steps: int = -1
+
     # Reward aggregation
     reward_aggregator: Literal["last", "sum"] = "last"
     """How to combine per-turn rewards: 'last' (use last turn reward) or 'sum' (sum all rewards across turns)."""
