@@ -443,6 +443,7 @@ class StreamingDataLoaderConfig:
     remap_verifier: str | None = None
     ifeval_reward_shaping: bool = False
     ifeval_reward_shaping_curriculum: bool = False
+    ifeval_random_zero_reward: bool = False
     ifeval_competence_c0: float = 0.1
     ifeval_competence_alpha: float = 1.0
     ifeval_num_curriculum_steps: int = -1
@@ -450,11 +451,13 @@ class StreamingDataLoaderConfig:
     # RLVR-MATH / RLVR-GSM reward shaping (see allenai/RLVR-MATH, allenai/RLVR-GSM)
     math_reward_shaping: bool = False
     math_reward_shaping_curriculum: bool = False
+    math_random_zero_reward: bool = False
     math_competence_c0: float = 0.1
     math_competence_alpha: float = 1.0
     math_num_curriculum_steps: int = -1
     gsm_reward_shaping: bool = False
     gsm_reward_shaping_curriculum: bool = False
+    gsm_random_zero_reward: bool = False
     gsm_competence_c0: float = 0.1
     gsm_competence_alpha: float = 1.0
     gsm_num_curriculum_steps: int = -1

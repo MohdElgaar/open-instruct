@@ -116,6 +116,7 @@ class MaxLengthVerifierConfig(VerifierConfig):
 class IFEvalVerifierConfig(VerifierConfig):
     ifeval_reward_shaping: bool = False
     ifeval_reward_shaping_curriculum: bool = False
+    ifeval_random_zero_reward: bool = False
     ifeval_competence_c0: float = 0.1
     ifeval_competence_alpha: float = 1.0
     ifeval_num_curriculum_steps: int = -1
@@ -127,6 +128,7 @@ class MathVerifierConfig(VerifierConfig):
 
     math_reward_shaping: bool = False
     math_reward_shaping_curriculum: bool = False
+    math_random_zero_reward: bool = False
     math_competence_c0: float = 0.1
     math_competence_alpha: float = 1.0
     math_num_curriculum_steps: int = -1
@@ -138,6 +140,7 @@ class GSMVerifierConfig(VerifierConfig):
 
     gsm_reward_shaping: bool = False
     gsm_reward_shaping_curriculum: bool = False
+    gsm_random_zero_reward: bool = False
     gsm_competence_c0: float = 0.1
     gsm_competence_alpha: float = 1.0
     gsm_num_curriculum_steps: int = -1
@@ -236,6 +239,12 @@ def remove_thinking_section(prediction: str) -> str:
 
 def _clamp_unit_interval(score: float) -> float:
     return max(0.0, min(1.0, float(score)))
+
+
+def _apply_random_zero_reward(score: float, enabled: bool, rollout_state: dict | None) -> float:
+    if enabled and score == 0.0 and not (rollout_state or {}).get("is_eval", False):
+        return float(np.random.random())
+    return score
 
 
 def competence(t: float, c0: float, alpha: float) -> float:
@@ -547,7 +556,7 @@ class GSM8KVerifier(VerifierFunction):
             return VerificationResult(score=1.0)
         use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
         if not use_shaping:
-            return VerificationResult(score=0.0)
+            return VerificationResult(score=_apply_random_zero_reward(0.0, cfg.gsm_random_zero_reward, rollout_state))
         shaped = _gsm_shaped_score(extracted, label)
         if cfg.gsm_reward_shaping_curriculum:
             mult = ifeval_partial_credit_multiplier(
@@ -556,8 +565,8 @@ class GSM8KVerifier(VerifierFunction):
                 cfg.gsm_competence_c0,
                 cfg.gsm_competence_alpha,
             )
-            return VerificationResult(score=shaped * mult)
-        return VerificationResult(score=shaped)
+            shaped *= mult
+        return VerificationResult(score=_apply_random_zero_reward(shaped, cfg.gsm_random_zero_reward, rollout_state))
 
 
 class MathVerifier(VerifierFunction):
@@ -627,7 +636,7 @@ class MathVerifier(VerifierFunction):
                 return VerificationResult(score=1.0)
         use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
         if not use_shaping:
-            return VerificationResult(score=0.0)
+            return VerificationResult(score=_apply_random_zero_reward(0.0, cfg.math_random_zero_reward, rollout_state))
         shaped = max(_math_shaped_score_for_candidate(a, label) for a in all_answers)
         if cfg.math_reward_shaping_curriculum:
             mult = ifeval_partial_credit_multiplier(
@@ -636,8 +645,8 @@ class MathVerifier(VerifierFunction):
                 cfg.math_competence_c0,
                 cfg.math_competence_alpha,
             )
-            return VerificationResult(score=shaped * mult)
-        return VerificationResult(score=shaped)
+            shaped *= mult
+        return VerificationResult(score=_apply_random_zero_reward(shaped, cfg.math_random_zero_reward, rollout_state))
 
 
 class StrictMathVerifier(VerifierFunction):
@@ -740,7 +749,9 @@ class IFEvalVerifier(VerifierFunction):
             else:
                 reward = 0.0
             rewards.append(reward)
-        return VerificationResult(score=sum(rewards) / len(rewards))
+        score = sum(rewards) / len(rewards)
+        return VerificationResult(score=_apply_random_zero_reward(score, cfg.ifeval_random_zero_reward, rollout_state))
+
 
 class IFBenchVerifier(IFEvalVerifier, VerifierFunction):
     """
