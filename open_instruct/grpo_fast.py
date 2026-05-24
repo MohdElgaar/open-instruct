@@ -890,7 +890,12 @@ class PolicyTrainerRayProcess(RayProcess):
                 latest_checkpoint_dir = get_latest_deepspeed_checkpoint_dir(checkpoint_state_dir)
                 training_step = client_state.get("training_step")
                 checkpoint_revision = f"step_{training_step}"
-                push_folder_to_hub(latest_checkpoint_dir, args.hf_repo_id, checkpoint_revision)
+                push_folder_to_hub(
+                    latest_checkpoint_dir,
+                    args.hf_repo_id,
+                    checkpoint_revision,
+                    private=args.hf_repo_private,
+                )
 
         # add back the mpu
         if old_mpu is not None:
@@ -2607,7 +2612,12 @@ def main(
         )
 
         if args.push_to_hub and (not dist.is_initialized() or dist.get_rank() == 0):
-            push_folder_to_hub(args.output_dir, args.hf_repo_id, args.hf_repo_revision)
+            push_folder_to_hub(
+                args.output_dir,
+                args.hf_repo_id,
+                args.hf_repo_revision,
+                private=args.hf_repo_private,
+            )
         emit_metrics_record(
             args.metrics_jsonl_path,
             "run_status",

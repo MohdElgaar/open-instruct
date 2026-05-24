@@ -188,6 +188,8 @@ class GRPOExperimentConfig(
     """The revision of the saved model in the Hugging Face Hub (can be autoset if not given)"""
     hf_repo_url: str | None = None
     """The url of the saved model in the Hugging Face Hub (will be autoset)"""
+    hf_repo_private: bool = False
+    """Whether the Hub repo is private. Only applies when the repo is first created."""
     metrics_jsonl_path: str | None = None
     """Optional path to append structured JSONL metrics for each step/eval event."""
     cache_dataset_only: bool = False
