@@ -119,6 +119,7 @@ from open_instruct.utils import (
     _z3_params_to_fetch,
     clean_last_n_checkpoints_deepspeed,
     get_eval_ds_config,
+    get_latest_deepspeed_checkpoint_dir,
     get_optimizer_grouped_parameters,
     get_train_ds_config,
     get_wandb_tags,
@@ -884,6 +885,13 @@ class PolicyTrainerRayProcess(RayProcess):
                 ray.remote(sync_gs_bucket).options(num_cpus=1).remote(
                     checkpoint_state_dir, args.gs_checkpoint_state_dir
                 )
+
+            if args.push_to_hub:
+                latest_checkpoint_dir = get_latest_deepspeed_checkpoint_dir(checkpoint_state_dir)
+                training_step = client_state.get("training_step")
+                checkpoint_revision = f"step_{training_step}"
+                push_folder_to_hub(latest_checkpoint_dir, args.hf_repo_id, checkpoint_revision)
+
         # add back the mpu
         if old_mpu is not None:
             self.model.mpu = old_mpu
@@ -1103,7 +1111,7 @@ def setup_runtime_variables(
     args.try_launch_beaker_eval_jobs_on_weka = args.try_launch_beaker_eval_jobs_on_weka and is_beaker_job()
     if args.push_to_hub:
         if args.hf_repo_id is None:  # auto-generate one
-            args.hf_repo_id = "open_instruct_dev"
+            args.hf_repo_id = args.exp_name
         if args.hf_entity is None:  # first try to use AI2 entity
             args.hf_entity = maybe_use_ai2_hf_entity()
         if args.hf_entity is None:  # then try to use the user's entity

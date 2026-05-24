@@ -874,6 +874,33 @@ def clean_last_n_checkpoints_deepspeed(output_dir: str, keep_last_n_checkpoints:
     print("Remaining files:" + str(os.listdir(output_dir)))
 
 
+def get_latest_deepspeed_checkpoint_dir(checkpoint_state_dir: str) -> str | None:
+    """Return the path to the most recent ``global_step*`` checkpoint directory."""
+    if not os.path.isdir(checkpoint_state_dir):
+        return None
+
+    latest_path = os.path.join(checkpoint_state_dir, "latest")
+    if os.path.isfile(latest_path):
+        with open(latest_path) as f:
+            latest_tag = f.read().strip()
+        latest_checkpoint_dir = os.path.join(checkpoint_state_dir, latest_tag)
+        if os.path.isdir(latest_checkpoint_dir):
+            return latest_checkpoint_dir
+
+    checkpoint_dirs = [
+        d
+        for d in os.listdir(checkpoint_state_dir)
+        if d.startswith("global_step")
+        and d[len("global_step") :].isdigit()
+        and os.path.isdir(os.path.join(checkpoint_state_dir, d))
+    ]
+    if not checkpoint_dirs:
+        return None
+
+    latest_tag = max(checkpoint_dirs, key=lambda d: int(d[len("global_step") :]))
+    return os.path.join(checkpoint_state_dir, latest_tag)
+
+
 def calibrate_checkpoint_state_dir(checkpoint_state_dir: str) -> None:
     """
     Find the latest valid checkpoint directory and update the 'latest' file.

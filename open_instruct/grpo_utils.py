@@ -179,7 +179,7 @@ class GRPOExperimentConfig(
     verbose: bool = False
     """If toggled, debug output will be shown"""
     push_to_hub: bool = False
-    """Whether to upload the saved model to huggingface"""
+    """Whether to upload checkpoint state and the final model to Hugging Face Hub"""
     hf_entity: str | None = None
     """The user or org name of the model repository from the Hugging Face Hub"""
     hf_repo_id: str | None = None
