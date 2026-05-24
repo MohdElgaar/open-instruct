@@ -1232,11 +1232,6 @@ def create_vllm_engines(
     trust_remote_code: bool = False,
     vllm_attention_backend: str | None = None,
 ) -> list[ray.actor.ActorHandle]:
-    if single_gpu_mode:
-        raise ValueError(
-            "single_gpu_mode is not yet supported with the native weight transfer API. "
-            "NCCL cannot have two ranks on the same CUDA device."
-        )
     vllm_engines = []
     # Use "mp" (multiprocessing) for TP > 1 when running inside a Ray actor.
     # Using "ray" executor causes placement group context loss in vLLM v1's
@@ -1351,13 +1346,7 @@ def _prepare_params_for_sync(
     DS3 gathered tensors may be non-contiguous or views into temporary buffers.
     Cloning ensures we send independent, contiguous tensors over NCCL.
     """
-    out: list[tuple[str, torch.Tensor]] = []
-    for n, p in params:
-        mapped = name_mapper(n) if name_mapper else n
-        if torch.isnan(p.data).any():
-            logger.error(f"NaN in trainer weight BEFORE send: {mapped}")
-        out.append((mapped, p.data.contiguous().clone()))
-    return out
+    return [(name_mapper(n) if name_mapper else n, p.data.contiguous().clone()) for n, p in params]
 
 
 def _collect_weight_metadata(

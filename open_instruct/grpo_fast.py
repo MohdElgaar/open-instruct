@@ -109,6 +109,7 @@ from open_instruct.model_utils import (
     print_rich_table,
     push_folder_to_hub,
 )
+from open_instruct.optimizer_device_utils import reconcile_fused_adam_optimizer_state_devices
 from open_instruct.rl_utils import Timer, masked_mean
 from open_instruct.utils import (
     ArgumentParserPlus,
@@ -387,7 +388,8 @@ class PolicyTrainerRayProcess(RayProcess):
         logger.info(f"Deepspeed config: {dschf=}")
 
         model_name_or_path = model_config.model_name_or_path
-        model_cls = AutoModelForMultimodalLM if "Qwen3.5" in model_name_or_path else AutoModelForCausalLM
+        # model_cls = AutoModelForMultimodalLM if "Qwen3.5" in model_name_or_path else AutoModelForCausalLM
+        model_cls = AutoModelForCausalLM
         logger.info(f"Loading policy model with {model_cls.__name__} for {model_name_or_path!r}")
         self.policy: PreTrainedModel = model_cls.from_pretrained(
             model_name_or_path,
@@ -479,6 +481,9 @@ class PolicyTrainerRayProcess(RayProcess):
 
                 logger.info(
                     f"{self.rank=}: Loaded checkpoint from {args.checkpoint_state_dir} with {optimization_steps_done=}"
+                )
+                reconcile_fused_adam_optimizer_state_devices(
+                    self.optimizer, fused=args.fused_optimizer, rank=self.rank
                 )
         self.model.train()
 
@@ -1080,7 +1085,8 @@ def setup_runtime_variables(
         assert streaming_config.mask_tool_use, "Must mask tool use when using vLLM logprobs or the ρ correction."
     if args.eval_pass_at_k < 1:
         raise ValueError(f"eval_pass_at_k must be >= 1, got {args.eval_pass_at_k}.")
-    args.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.run_name is None:
+        args.run_name = f"{args.exp_name}__{args.seed}__{int(time.time())}"
     args.output_dir = os.path.join(args.output_dir, args.run_name)
     if args.checkpoint_state_dir is None:
         args.checkpoint_state_dir = args.output_dir
@@ -1475,21 +1481,13 @@ def create_model_and_optimizer(
     data_prep_actor_state = _build_data_prep_actor_resume_state(checkpoint_state)
     if data_prep_actor_state is not None:
         ray_get_with_progress(
-            [_data_prep_actor.set_state.remote(data_prep_actor_state)],
-            desc="Restoring data prep actor state",
+            [_data_prep_actor.set_state.remote(data_prep_actor_state)], desc="Restoring data prep actor state"
         )
         logger.info(
             "Restored data prep actor state from checkpoint "
             f"with training_step={data_prep_actor_state['training_step']}"
         )
     ray_get_with_progress([_data_prep_actor.start.remote()], desc="Starting data prep actor")
-
-    ray_get_with_progress(
-        [m.setup_model_update_group.remote(vllm_engines=vllm_engines) for m in policy_group.models],
-        desc="Setting up model update group",
-    )
-    logger.info("======== ✅ model update group setup successfully =========")
-
     return (
         policy_group,
         vllm_engines,
@@ -2196,7 +2194,7 @@ def run_training(
 
         remaining_steps = args.num_training_steps - training_step
         eta_seconds = remaining_steps * avg_step_time
-        logger.info(
+        print(
             f"[Main Thread] ⏳ ETA to finish: {utils.format_eta(eta_seconds)} ({avg_step_time:.2f}s/step, remaining {remaining_steps} steps)"
         )
 

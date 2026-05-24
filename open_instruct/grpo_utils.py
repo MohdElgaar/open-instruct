@@ -162,7 +162,7 @@ class GRPOExperimentConfig(
     """whether to offload parameters to CPU (reduces GPU memory usage)"""
     deepspeed_offload_optimizer: bool = False
     """whether to offload optimizer states to CPU (reduces GPU memory usage)"""
-    deepspeed_checkpoint_load_universal: bool = False
+    deepspeed_checkpoint_load_universal: bool = True
     """DeepSpeed checkpoint.load_universal: load checkpoints across different parallel configs"""
     gather_whole_model: bool = True
     """whether to gather the whole model to boardcast (not doable for 70B but can be faster for 8B)"""
@@ -178,7 +178,7 @@ class GRPOExperimentConfig(
     # Experiment tracking
     verbose: bool = False
     """If toggled, debug output will be shown"""
-    push_to_hub: bool = True
+    push_to_hub: bool = False
     """Whether to upload the saved model to huggingface"""
     hf_entity: str | None = None
     """The user or org name of the model repository from the Hugging Face Hub"""

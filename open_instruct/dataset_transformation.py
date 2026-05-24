@@ -1175,7 +1175,6 @@ def sft_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreTrained
         truncation=True,
         max_length=max_seq_length,
         add_generation_prompt=False,
-        return_dict=False,
     )
     assert isinstance(input_ids_result, torch.Tensor)
     input_ids = input_ids_result
@@ -1202,7 +1201,6 @@ def last_turn_tulu_tokenize_and_truncate_v1(row: dict[str, Any], tokenizer: PreT
         truncation=True,
         max_length=max_seq_length,
         add_generation_prompt=False,
-        return_dict=False,
     )
     assert isinstance(input_ids_result, torch.Tensor)
     input_ids = input_ids_result
@@ -1368,9 +1366,8 @@ def rlvr_tokenize_v1(
     row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(
         prompt,
         add_generation_prompt=True,
-        return_dict=False,
         tools=tools_for_template,  # type: ignore[arg-type]
-        return_dict=False
+        return_dict=False,
     )
     row[INPUT_IDS_KEY] = tokenizer.apply_chat_template(row[sft_messages_key], return_dict=False)
     row[ATTENTION_MASK_KEY] = [1] * len(row[INPUT_IDS_KEY])
@@ -1469,16 +1466,11 @@ def rlvr_tokenize_v3(
     row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(
         prompt,
         add_generation_prompt=True,
-        return_dict=False,
         tools=tools_for_template,  # type: ignore[arg-type]
-        return_dict=False
+        return_dict=False,
     )
     if tokenizer.pad_token_id in row[INPUT_IDS_PROMPT_KEY]:
         row[INPUT_IDS_PROMPT_KEY] = [x for x in row[INPUT_IDS_PROMPT_KEY] if x != tokenizer.pad_token_id]
-    # Get the raw values from the source keys
-    ground_truths_val = row[ground_truths_key]
-    verifier_source_val = row[verifier_source_key]
-
     # Get the raw values from the source keys
     ground_truths_val = row[ground_truths_key]
     verifier_source_val = row[verifier_source_key]

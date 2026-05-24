@@ -790,6 +790,7 @@ def process_group(
     param_prompt_Q: ray_queue.Queue | None,
     base_env_config: EnvConfig,
     ground_truth_overrides: dict[int, Any] | None = None,
+    training_step: int | None = None,
 ) -> Group | None:
     assert result.index is not None
     assert result.reward_scores is not None
@@ -1101,6 +1102,7 @@ def accumulate_inference_batches(
             param_prompt_Q=param_prompt_Q,
             base_env_config=base_env_config,
             ground_truth_overrides=ground_truth_overrides,
+            training_step=training_step,
         )
 
         if group is None:
@@ -1372,13 +1374,9 @@ class DataPreparationActor:
             )
 
         while self.training_step < self.num_training_steps:
-            if self.shutdown_requested:
-                return
             generation_idle_wait_start_time = time.perf_counter()
             wait_count = 0
             while self.training_step - self._last_consumed_step > self.config.async_steps:
-                if self.shutdown_requested:
-                    return
                 if (wait_count + 1) % 1000 == 0:
                     logger.info(
                         f"[DataPreparationActor] Step {self.training_step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute. Wait count: {wait_count}"
