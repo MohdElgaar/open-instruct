@@ -13,9 +13,12 @@ from parameterized import parameterized
 from open_instruct.ground_truth_utils import (
     F1Verifier,
     GSM8KVerifier,
+    IFEvalVerifier,
+    IFEvalVerifierConfig,
     LMJudgeVerifier,
     LMJudgeVerifierConfig,
     PuzzleMatcherVerifier,
+    RewardConfig,
     cleanup_all_llm_judge_clients,
 )
 
@@ -170,6 +173,73 @@ class TestGSM8KVerifier(unittest.TestCase):
     def test_signed_number_extraction(self, _name, prediction, label, expected_score):
         result = self.verifier([], prediction, label)
         self.assertEqual(result.score, expected_score)
+
+
+class TestIFEvalPGCPCAReward(unittest.TestCase):
+    def setUp(self):
+        self.label = str(
+            [
+                {
+                    "instruction_id": ["length_constraints:number_words"],
+                    "kwargs": [{"num_words": 5, "relation": "at least"}],
+                }
+            ]
+        )
+
+    def _infos(self, n: int):
+        return SimpleNamespace(
+            timeouts=[False] * n,
+            tool_errors=[False] * n,
+            tool_outputs=[[] for _ in range(n)],
+            tool_calleds=[False] * n,
+            rollout_states=[{} for _ in range(n)],
+            training_steps=[1] * n,
+            is_eval=False,
+        )
+
+    def _reward_config(self):
+        verifier = IFEvalVerifier(IFEvalVerifierConfig())
+        return RewardConfig(
+            verification_reward=1.0,
+            verifier_functions={"ifeval": verifier},
+            ifeval_pg_cpca=True,
+            ifeval_pg_cpca_default_reliability=1.0,
+        )
+
+    def test_pg_cpca_rescues_all_zero_collapsed_constraints(self):
+        reward_fn = self._reward_config().build()
+        scores, metrics = asyncio.run(
+            reward_fn(
+                responses=[[1], [2]],
+                decoded_responses=["one two three four", "one"],
+                ground_truths=[self.label, self.label],
+                datasets=["ifeval", "ifeval"],
+                finish_reasons=["stop", "stop"],
+                infos=self._infos(2),
+            )
+        )
+
+        self.assertGreater(scores[0], scores[1])
+        self.assertGreater(scores[1], 0.0)
+        self.assertEqual(metrics["objective/ifeval_pg_cpca_cacr0"], 1.0)
+        self.assertEqual(metrics["objective/ifeval_pg_cpca_eligible"], 1.0)
+
+    def test_pg_cpca_collapse_gating_keeps_failed_samples_binary_when_group_has_exact_success(self):
+        reward_fn = self._reward_config().build()
+        scores, metrics = asyncio.run(
+            reward_fn(
+                responses=[[1], [2]],
+                decoded_responses=["one two three four five", "one two three four"],
+                ground_truths=[self.label, self.label],
+                datasets=["ifeval", "ifeval"],
+                finish_reasons=["stop", "stop"],
+                infos=self._infos(2),
+            )
+        )
+
+        self.assertEqual(scores, [1.0, 0.0])
+        self.assertEqual(metrics["objective/ifeval_pg_cpca_cacr0"], 0.0)
+        self.assertEqual(metrics["objective/ifeval_pg_cpca_eligible"], 0.0)
 
 
 def _make_litellm_response(content: str, prompt_tokens: int = 10, completion_tokens: int = 5):

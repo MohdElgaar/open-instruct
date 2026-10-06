@@ -396,6 +396,8 @@ class VLLMConfig:
     vllm_tensor_parallel_size: int = 1
     vllm_enforce_eager: bool = False
     vllm_attention_backend: str | None = None
+    # vLLM --gdn-prefill-backend (flashinfer|triton). Not a VLLM_* env var.
+    vllm_gdn_prefill_backend: str | None = None
     vllm_sync_backend: str = "nccl"
     vllm_gpu_memory_utilization: float = 0.9
     vllm_enable_prefix_caching: bool = False
@@ -457,6 +459,16 @@ class StreamingDataLoaderConfig:
     ifeval_competence_c0: float = 0.1
     ifeval_competence_alpha: float = 1.0
     ifeval_num_curriculum_steps: int = -1
+    ifeval_pg_cpca: bool = False
+    ifeval_pg_cpca_calibration: bool = True
+    ifeval_pg_cpca_collapse_gating: bool = True
+    ifeval_pg_cpca_adaptive_annealing: bool = True
+    ifeval_pg_cpca_placebo: bool = False
+    ifeval_pg_cpca_tau: float = 0.7
+    ifeval_pg_cpca_delta: float = 1e-6
+    ifeval_pg_cpca_beta: float = 1.0
+    ifeval_pg_cpca_default_reliability: float = 1.0
+    ifeval_pg_cpca_reliability_json: str = ""
 
     # RLVR-MATH / RLVR-GSM reward shaping (see allenai/RLVR-MATH, allenai/RLVR-GSM)
     math_reward_shaping: bool = False

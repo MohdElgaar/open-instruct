@@ -566,6 +566,10 @@ async def compute_rewards(actor: "LLMRayActor", result: GenerationResult, exampl
     k_ground_truths = [example[GROUND_TRUTHS_KEY]] * k
     k_datasets = [example[VERIFIER_SOURCE_KEY]] * k
     k_raw_queries = [example[RAW_PROMPT_KEY]] * k
+    for completion_index, rollout_state in enumerate(result.request_info.rollout_states):
+        rollout_state["prompt_id"] = result.prompt_id
+        rollout_state["completion_id"] = f"{result.prompt_id}_{completion_index}"
+        rollout_state["group_id"] = result.prompt_id
     scores, metrics = await actor.reward_fn(
         result.responses,
         decoded_responses,
@@ -1231,6 +1235,7 @@ def create_vllm_engines(
     eval_dataset=None,
     trust_remote_code: bool = False,
     vllm_attention_backend: str | None = None,
+    vllm_gdn_prefill_backend: str | None = None,
 ) -> list[ray.actor.ActorHandle]:
     vllm_engines = []
     # Use "mp" (multiprocessing) for TP > 1 when running inside a Ray actor.
@@ -1318,6 +1323,7 @@ def create_vllm_engines(
                 eval_dataset=eval_dataset,
                 trust_remote_code=trust_remote_code,
                 attention_backend=vllm_attention_backend,
+                gdn_prefill_backend=vllm_gdn_prefill_backend,
                 language_model_only=True,
             )
         )

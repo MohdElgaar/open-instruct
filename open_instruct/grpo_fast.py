@@ -1457,6 +1457,7 @@ def create_model_and_optimizer(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         vllm_attention_backend=vllm_config.vllm_attention_backend,
+        vllm_gdn_prefill_backend=vllm_config.vllm_gdn_prefill_backend,
     )
     logger.info("======== ✅ vLLM engines and actor_manager initialized =========")
 
@@ -2536,6 +2537,16 @@ def main(
         only_reward_good_outputs=tools_config.only_reward_good_outputs,
         additive_format_reward=streaming_config.additive_format_reward,
         verifier_functions=build_all_verifiers(args, streaming_config),
+        ifeval_pg_cpca=streaming_config.ifeval_pg_cpca,
+        ifeval_pg_cpca_calibration=streaming_config.ifeval_pg_cpca_calibration,
+        ifeval_pg_cpca_collapse_gating=streaming_config.ifeval_pg_cpca_collapse_gating,
+        ifeval_pg_cpca_adaptive_annealing=streaming_config.ifeval_pg_cpca_adaptive_annealing,
+        ifeval_pg_cpca_placebo=streaming_config.ifeval_pg_cpca_placebo,
+        ifeval_pg_cpca_tau=streaming_config.ifeval_pg_cpca_tau,
+        ifeval_pg_cpca_delta=streaming_config.ifeval_pg_cpca_delta,
+        ifeval_pg_cpca_beta=streaming_config.ifeval_pg_cpca_beta,
+        ifeval_pg_cpca_default_reliability=streaming_config.ifeval_pg_cpca_default_reliability,
+        ifeval_pg_cpca_reliability_json=streaming_config.ifeval_pg_cpca_reliability_json,
         reward_aggregator=streaming_config.reward_aggregator,
     )
 

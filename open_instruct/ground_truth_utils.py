@@ -518,6 +518,157 @@ def _score_ifeval_instruction(instruction_instance: object, answer: str) -> floa
     return None
 
 
+def _parse_ifeval_constraint_dict(label: str | dict) -> dict:
+    constraint_dict = ast.literal_eval(label) if isinstance(label, str) else label
+    constraint_dict = constraint_dict[0]
+    if isinstance(constraint_dict, str):
+        constraint_dict = json.loads(constraint_dict)
+    return constraint_dict
+
+
+def _ifeval_per_constraint_scores(
+    instruction_dict: dict[str, type],
+    prediction: str,
+    label: str | dict,
+) -> list[dict[str, float | str]]:
+    constraint_dict = _parse_ifeval_constraint_dict(label)
+    answer = remove_thinking_section(prediction)
+    instruction_keys = constraint_dict["instruction_id"]
+    args_list = constraint_dict["kwargs"]
+    has_answer = bool(prediction.strip()) and bool(answer)
+    scores: list[dict[str, float | str]] = []
+
+    for instruction_key, args in zip(instruction_keys, args_list):
+        if args is None:
+            args = {}
+        args = {k: v for k, v in args.items() if v is not None}
+        instruction_cls = instruction_dict[instruction_key]
+        instruction_instance = instruction_cls(instruction_key)
+        instruction_instance.build_description(**args)
+
+        exact = 1.0 if has_answer and instruction_instance.check_following(answer) else 0.0
+        partial = 0.0
+        if has_answer and exact == 0.0:
+            shaped = _score_ifeval_instruction(instruction_instance, answer)
+            if shaped is not None:
+                partial = _clamp_unit_interval(shaped)
+
+        scores.append({"family": instruction_key, "exact": exact, "partial": partial})
+
+    return scores
+
+
+def _parse_ifeval_pg_cpca_reliability(raw: str | None) -> dict[str, float]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("Invalid ifeval_pg_cpca_reliability_json; using default reliability for all families.")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning("ifeval_pg_cpca_reliability_json must be a JSON object; using default reliability.")
+        return {}
+    reliability = {}
+    for family, value in parsed.items():
+        try:
+            reliability[str(family)] = _clamp_unit_interval(float(value))
+        except (TypeError, ValueError):
+            logger.warning("Invalid PG-CPCA reliability for family %s; ignoring it.", family)
+    return reliability
+
+
+def _compute_ifeval_pg_cpca_unit_scores(
+    verifier: "IFEvalVerifier",
+    decoded_responses: list[str],
+    label: str | dict,
+    training_step: int | None,
+    cfg: Any,
+) -> tuple[list[float], dict[str, float]]:
+    per_response = [_ifeval_per_constraint_scores(verifier.instruction_dict, response, label) for response in decoded_responses]
+    if not per_response or not per_response[0]:
+        return [0.0] * len(decoded_responses), {}
+
+    families = [str(item["family"]) for item in per_response[0]]
+    reliability = _parse_ifeval_pg_cpca_reliability(getattr(cfg, "ifeval_pg_cpca_reliability_json", ""))
+    default_reliability = _clamp_unit_interval(getattr(cfg, "ifeval_pg_cpca_default_reliability", 1.0))
+    tau = float(getattr(cfg, "ifeval_pg_cpca_tau", 0.7))
+    delta = max(0.0, float(getattr(cfg, "ifeval_pg_cpca_delta", 1e-6)))
+    beta = max(0.0, float(getattr(cfg, "ifeval_pg_cpca_beta", 1.0)))
+    use_calibration = bool(getattr(cfg, "ifeval_pg_cpca_calibration", True))
+    use_collapse_gating = bool(getattr(cfg, "ifeval_pg_cpca_collapse_gating", True))
+    use_adaptive_annealing = bool(getattr(cfg, "ifeval_pg_cpca_adaptive_annealing", True))
+    use_placebo = bool(getattr(cfg, "ifeval_pg_cpca_placebo", False))
+
+    family_exact: dict[str, list[float]] = {family: [] for family in families}
+    family_partial: dict[str, list[float]] = {family: [] for family in families}
+    for response_scores in per_response:
+        for item in response_scores:
+            family = str(item["family"])
+            family_exact[family].append(float(item["exact"]))
+            family_partial[family].append(float(item["partial"]))
+
+    collapsed0 = {family: float(sum(vals) == 0.0) for family, vals in family_exact.items()}
+    collapsed1 = {family: float(sum(vals) == len(vals)) for family, vals in family_exact.items()}
+    dispersed = {family: float(np.var(family_partial[family]) > delta) for family in families}
+    eligible: dict[str, float] = {}
+    family_rho: dict[str, float] = {}
+
+    for family in families:
+        rho = reliability.get(family, default_reliability) if use_calibration else 1.0
+        family_rho[family] = rho
+        reliable = rho >= tau if use_calibration else True
+        collapse_ok = bool(collapsed0[family]) if use_collapse_gating else True
+        eligible[family] = float(collapse_ok and bool(dispersed[family]) and reliable)
+
+    if use_placebo:
+        rng_seed = int(training_step or 0) + sum(ord(ch) for family in families for ch in family)
+        rng = np.random.default_rng(rng_seed)
+        for family in families:
+            shuffled = list(family_partial[family])
+            rng.shuffle(shuffled)
+            family_partial[family] = shuffled
+
+    fixed_mult = ifeval_partial_credit_multiplier(
+        training_step,
+        getattr(cfg, "ifeval_num_curriculum_steps", -1),
+        getattr(cfg, "ifeval_competence_c0", 0.1),
+        getattr(cfg, "ifeval_competence_alpha", 1.0),
+    )
+
+    unit_scores = []
+    exact_scores = []
+    rescue_scores = []
+    for response_idx, response_scores in enumerate(per_response):
+        exact_sum = 0.0
+        rescue_sum = 0.0
+        for item in response_scores:
+            family = str(item["family"])
+            exact = float(item["exact"])
+            exact_sum += exact
+            if exact == 0.0 and eligible[family]:
+                mult = 1.0 if use_adaptive_annealing else fixed_mult
+                rescue_sum += beta * mult * family_rho[family] * family_partial[family][response_idx]
+
+        denom = max(len(response_scores), 1)
+        exact_score = exact_sum / denom
+        rescue_score = rescue_sum / denom
+        exact_scores.append(exact_score)
+        rescue_scores.append(rescue_score)
+        unit_scores.append(_clamp_unit_interval(exact_score + rescue_score))
+
+    metrics = {
+        "objective/ifeval_pg_cpca_exact_score": float(np.mean(exact_scores)),
+        "objective/ifeval_pg_cpca_rescue_score": float(np.mean(rescue_scores)),
+        "objective/ifeval_pg_cpca_cacr0": float(np.mean(list(collapsed0.values()))),
+        "objective/ifeval_pg_cpca_cacr1": float(np.mean(list(collapsed1.values()))),
+        "objective/ifeval_pg_cpca_dispersed": float(np.mean(list(dispersed.values()))),
+        "objective/ifeval_pg_cpca_eligible": float(np.mean(list(eligible.values()))),
+        "objective/ifeval_pg_cpca_mean_rho": float(np.mean(list(family_rho.values()))),
+    }
+    return unit_scores, metrics
+
+
 class GSM8KVerifier(VerifierFunction):
     """
     Verifier for GSM8K tasks that extracts the last number from the prediction
@@ -704,14 +855,6 @@ class IFEvalVerifier(VerifierFunction):
         query: str | None = None,
         rollout_state: dict | None = None,
     ) -> VerificationResult:
-        constraint_dict = ast.literal_eval(label)
-        constraint_dict = constraint_dict[0]
-        if isinstance(constraint_dict, str):
-            constraint_dict = json.loads(constraint_dict)
-        answer = remove_thinking_section(prediction)
-        instruction_keys = constraint_dict["instruction_id"]
-        args_list = constraint_dict["kwargs"]
-        rewards = []
         cfg = self.verifier_config
         rs = rollout_state or {}
         use_shaping = self.use_reward_shaping and not rs.get("is_eval", False)
@@ -725,30 +868,21 @@ class IFEvalVerifier(VerifierFunction):
             )
         else:
             mult = 1.0
+        answer = remove_thinking_section(prediction)
         if len(prediction) == 0 or len(answer) == 0:
             logger.warning("Empty prediction received for IFEvalVerifier.")
             return VerificationResult(score=0.0)
-        for instruction_key, args in zip(instruction_keys, args_list):
-            if args is None:
-                args = {}
-            args = {k: v for k, v in args.items() if v is not None}
-            instruction_cls = self.instruction_dict[instruction_key]
-            instruction_instance = instruction_cls(instruction_key)
-            instruction_instance.build_description(**args)
-            if prediction.strip():
-                if instruction_instance.check_following(answer):
-                    reward = 1.0
-                elif use_shaping:
-                    shaped = _score_ifeval_instruction(instruction_instance, answer)
-                    if shaped is not None:
-                        reward = shaped * mult
-                    else:
-                        reward = 0.0
-                else:
-                    reward = 0.0
+        rewards = []
+        for item in _ifeval_per_constraint_scores(self.instruction_dict, prediction, label):
+            if float(item["exact"]) == 1.0:
+                reward = 1.0
+            elif use_shaping:
+                reward = float(item["partial"]) * mult
             else:
                 reward = 0.0
             rewards.append(reward)
+        if not rewards:
+            return VerificationResult(score=0.0)
         score = sum(rewards) / len(rewards)
         return VerificationResult(score=_apply_random_zero_reward(score, cfg.ifeval_random_zero_reward, rollout_state))
 
@@ -1737,6 +1871,16 @@ class RewardConfig:
     only_reward_good_outputs: bool = False
     additive_format_reward: bool = False
     verifier_functions: dict[str, VerifierFunction] = dataclasses.field(default_factory=dict)
+    ifeval_pg_cpca: bool = False
+    ifeval_pg_cpca_calibration: bool = True
+    ifeval_pg_cpca_collapse_gating: bool = True
+    ifeval_pg_cpca_adaptive_annealing: bool = True
+    ifeval_pg_cpca_placebo: bool = False
+    ifeval_pg_cpca_tau: float = 0.7
+    ifeval_pg_cpca_delta: float = 1e-6
+    ifeval_pg_cpca_beta: float = 1.0
+    ifeval_pg_cpca_default_reliability: float = 1.0
+    ifeval_pg_cpca_reliability_json: str = ""
     reward_aggregator: Literal["last", "sum"] = "last"
     """How to combine per-turn rewards: 'last' (use last turn reward) or 'sum' (sum all rewards across turns)."""
 
@@ -1790,16 +1934,38 @@ class RewardConfig:
                 metrics["val/format_scores"] = np.array(format_scores).mean()
 
             if self.apply_verifiable_reward:
-                verifiable_rewards, per_func_rewards = await apply_verifiable_reward(
-                    self.verifier_functions,
-                    responses,
-                    decoded_responses,
-                    ground_truths,
-                    datasets,
-                    reward_mult=self.verification_reward,
-                    queries=queries,
-                    rollout_states=rollout_states,
-                )
+                pg_cpca_metrics: dict[str, Any] = {}
+                pg_cpca_verifier = None
+                if self.ifeval_pg_cpca and not is_eval_flag and datasets:
+                    dataset_name = str(datasets[0]).lower()
+                    if all(str(ds).lower() == dataset_name for ds in datasets):
+                        pg_cpca_verifier = self.verifier_functions.get(dataset_name)
+                    if not isinstance(pg_cpca_verifier, IFEvalVerifier):
+                        pg_cpca_verifier = None
+
+                if pg_cpca_verifier is not None:
+                    training_step = next((ts for ts in ts_list if ts is not None), None)
+                    unit_scores, pg_cpca_metrics = _compute_ifeval_pg_cpca_unit_scores(
+                        pg_cpca_verifier,
+                        decoded_responses,
+                        ground_truths[0],
+                        training_step,
+                        self,
+                    )
+                    verifiable_rewards = [self.verification_reward * score for score in unit_scores]
+                    per_func_rewards = [{pg_cpca_verifier.name: reward} for reward in verifiable_rewards]
+                    metrics.update(pg_cpca_metrics)
+                else:
+                    verifiable_rewards, per_func_rewards = await apply_verifiable_reward(
+                        self.verifier_functions,
+                        responses,
+                        decoded_responses,
+                        ground_truths,
+                        datasets,
+                        reward_mult=self.verification_reward,
+                        queries=queries,
+                        rollout_states=rollout_states,
+                    )
                 if len(verifiable_rewards) != len(scores):
                     raise ValueError(f"{len(verifiable_rewards)=} != {len(scores)=}")
 
