@@ -15,7 +15,6 @@ uv run python mason.py \
         --max_retries 0 \
         --env VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
         --env VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
-        --budget ai2/oe-other \
         --no_auto_dataset_cache \
         --artifact_ttl 1d \
         --gpus 8 -- source configs/beaker_configs/ray_node_setup.sh \&\& source configs/beaker_configs/code_api_setup.sh \&\&python open_instruct/grpo_fast.py \
@@ -37,7 +36,7 @@ uv run python mason.py \
         --response_length 4096 \
         --pack_length 20480 \
         --model_name_or_path allenai/Olmo-Hybrid-Instruct-DPO-7B \
-        --chat_template_name olmo123 \
+        --chat_template_name tokenizer_default \
         --trust_remote_code \
         --vllm_enforce_eager \
 	--inflight_updates True \

@@ -38,7 +38,7 @@ from tqdm.auto import tqdm
 from transformers import DataCollatorForSeq2Seq
 from transformers.training_args import _convert_str_dict
 
-from open_instruct import logger_utils, model_utils, padding_free_collator, tensor_utils, utils
+from open_instruct import logger_utils, model_utils, olmo_core_utils, padding_free_collator, tensor_utils, utils
 from open_instruct.dataset_transformation import (
     TOKENIZED_PREFERENCE_DATASET_KEYS,
     TokenizerConfig,
@@ -366,20 +366,22 @@ def compute_reference_cache_hash(args: DPOExperimentConfig, tc: TokenizerConfig)
         args.mixer_list, args.mixer_list_splits, args.transform_fn, transform_fn_args, args.target_columns
     )
     dataset_config_hash = args.config_hash or compute_config_hash(dcs, tc)
-    config_str = json.dumps(
-        {
-            "concatenated_forward": args.concatenated_forward,
-            "dataset_config_hash": dataset_config_hash,
-            "loss_type": args.loss_type,
-            "max_train_samples": args.max_train_samples,
-            "model_name_or_path": args.model_name_or_path,
-            "model_revision": args.model_revision,
-            "packing": args.packing,
-            "use_lora": args.use_lora,
-            "use_qlora": args.use_qlora,
-        },
-        sort_keys=True,
-    )
+    config = {
+        "concatenated_forward": args.concatenated_forward,
+        "dataset_config_hash": dataset_config_hash,
+        "loss_type": args.loss_type,
+        "max_train_samples": args.max_train_samples,
+        "model_name_or_path": args.model_name_or_path,
+        "model_revision": args.model_revision,
+        "packing": args.packing,
+        "use_lora": args.use_lora,
+        "use_qlora": args.use_qlora,
+    }
+    if args.max_train_samples is not None:
+        # A subset is drawn after shuffling, so which rows it holds depends on the seed.
+        # Kept out of the full-dataset hash, which is seed-independent.
+        config["seed"] = args.seed
+    config_str = json.dumps(config, sort_keys=True)
     return hashlib.sha256(config_str.encode()).hexdigest()[:16]
 
 
@@ -707,7 +709,7 @@ def _get_batch_logps(
     loss_mask = labels[:, 1:] != -100
 
     if average_log_prob:
-        return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+        return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1).clamp(min=1)
     else:
         return (per_token_logps * loss_mask).sum(-1)
 
@@ -987,7 +989,20 @@ def concatenated_forward_olmo(
         concatenated_batch, bs = pf_concatenated_inputs(batch)
 
     concatenated_labels = concatenated_batch["concatenated_labels"]
-    output = model(concatenated_batch["concatenated_input_ids"], labels=concatenated_labels)
+    if not packing:
+        output = model(concatenated_batch["concatenated_input_ids"], labels=concatenated_labels)
+    else:
+        doc_lens_BD, max_doc_lens_B = olmo_core_utils.doc_lens_from_cu_seq_lens(
+            concatenated_batch["concatenated_cu_seq_lens_k"],
+            seq_len=concatenated_batch["concatenated_input_ids"].shape[-1],
+        )
+        output = model(
+            concatenated_batch["concatenated_input_ids"],
+            labels=concatenated_labels,
+            position_ids=concatenated_batch.get("concatenated_position_ids"),
+            doc_lens=doc_lens_BD,
+            max_doc_lens=max_doc_lens_B,
+        )
     per_token_logps = output.loss
 
     if not packing:

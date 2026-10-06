@@ -20,7 +20,6 @@ tokenizer_path=/weka/oe-adapt-default/saumyam/open-instruct/dolma2-tokenizer-olm
 
 uv run python mason.py \
   --cluster ai2/jupiter \
-  --budget ai2/oe-other \
   --workspace ai2/open-instruct-dev \
   --image "$BEAKER_IMAGE" \
   --pure_docker_mode \
@@ -41,6 +40,6 @@ uv run python mason.py \
       --tokenizer_name_or_path $tokenizer_path \
       --output_dir /weka/oe-adapt-default/${BEAKER_USER}/dataset/olmo-hybrid-fresh \
       --visualize True \
-      --chat_template_name "olmo123" \
+      --chat_template_name "tokenizer_default" \
       --max_seq_length 32768 \
       --resume True

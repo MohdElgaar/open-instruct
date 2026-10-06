@@ -28,7 +28,6 @@ uv run mason.py \
     --num_nodes 1 \
     --env VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     --gpus $NUM_GPUS \
-    --budget ai2/oe-other \
     -- \
 uv run open_instruct/grpo.py \
     --run_name "${RUN_NAME}" \
@@ -48,7 +47,7 @@ uv run open_instruct/grpo.py \
     --per_device_train_batch_size 1 \
     --dataset_mixer_list hamishivi/DAPO-Math-17k-Processed_filtered 1.0 \
     --dataset_mixer_list_splits "train" \
-    --dataset_mixer_eval_list mnoukhov/aime_2025_openinstruct 1.0 mnoukhov/brumo_2025_openinstruct 1.0 \
+    --dataset_mixer_eval_list allenai/aime_2025_openinstruct 1.0 allenai/brumo_2025_openinstruct 1.0 \
     --dataset_mixer_eval_list_splits "train" \
     --max_prompt_token_length 2048 \
     --response_length 8192 \

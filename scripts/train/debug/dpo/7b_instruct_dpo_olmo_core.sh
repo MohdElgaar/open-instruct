@@ -14,7 +14,6 @@ uv run python mason.py \
     --pure_docker_mode \
     --preemptible \
     --num_nodes 2 \
-    --budget ai2/oe-other \
     --no_auto_dataset_cache \
     --artifact_ttl 1d \
     --env OLMO_SHARED_FS=1 \
@@ -29,7 +28,7 @@ uv run python mason.py \
     --exp_name "$EXP_NAME" \
     --model_name_or_path "$MODEL_NAME" \
     --config_name olmo3_7B \
-    --chat_template_name olmo123 \
+    --chat_template_name tokenizer_default \
     --max_seq_length 8192 \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 4 \

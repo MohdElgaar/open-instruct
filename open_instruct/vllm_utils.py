@@ -137,7 +137,7 @@ class WeightUpdateRPCArgs(TypedDict):
 
 @dataclasses.dataclass
 class SamplingConfig:
-    temperature: float = 0.7
+    temperature: float
     top_p: float = 1.0
     max_tokens: int = 256
     min_tokens: int = 0
@@ -1303,6 +1303,7 @@ def create_vllm_engines(
                 enable_prefix_caching=enable_prefix_caching,
                 max_model_len=max_model_len,
                 gpu_memory_utilization=vllm_gpu_memory_utilization,
+                logprobs_mode="processed_logprobs",
                 bundle_indices=bundle_indices,
                 num_gpus=0.2 if use_hybrid_engine else 1,
                 noset_visible_devices=ray_noset_visible_devices(),

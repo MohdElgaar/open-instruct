@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Copied from https://github.com/huggingface/alignment-handbook/blob/main/tests/test_data.py
+import dataclasses
 import json
 import os
 import pathlib
@@ -70,6 +71,22 @@ MODEL_DIMS: dict[str, utils.ModelDims] = {
         num_kv_heads=8,
         device_name="h100",
     ),
+    "olmo-hybrid-7b": utils.ModelDims(
+        num_layers=8,
+        hidden_size=3840,
+        intermediate_size=11008,
+        vocab_size=100352,
+        num_attn_heads=30,
+        head_dim=128,
+        num_kv_heads=30,
+        num_linear_attn_layers=6,
+        linear_attn_num_k_heads=30,
+        linear_attn_num_v_heads=30,
+        linear_attn_key_head_dim=96,
+        linear_attn_value_head_dim=192,
+        linear_attn_conv_size=4,
+        device_name="h100",
+    ),
 }
 
 
@@ -125,6 +142,54 @@ class GetDatasetsTest(unittest.TestCase):
         # two special cases which beaker uses
         self.assertTrue(parser.parse("2024-09-16T19:03:02.31502Z"))
         self.assertTrue(parser.parse("0001-01-01T00:00:00Z"))
+
+
+class CombineDatasetTest(unittest.TestCase):
+    """Exercises combine_dataset end-to-end against local jsonl fixtures (no network)."""
+
+    SFT_PATH = str(pathlib.Path(__file__).parent / "test_data" / "sft_sample.jsonl")
+    RLVR_PATH = str(pathlib.Path(__file__).parent / "test_data" / "rlvr_sample.jsonl")
+
+    @parameterized.expand(
+        [
+            ("full_fractions", {SFT_PATH: 1.0, RLVR_PATH: 1.0}, 200),
+            ("half_fractions", {SFT_PATH: 0.5, RLVR_PATH: 0.5}, 100),
+            ("asymmetric_fractions", {SFT_PATH: 0.7, RLVR_PATH: 0.3}, 100),
+            ("zero_and_full", {SFT_PATH: 0.0, RLVR_PATH: 1.0}, 100),
+            ("int_sample_counts", {SFT_PATH: 25, RLVR_PATH: 50}, 75),
+            ("mixed_fraction_and_count", {SFT_PATH: 0.4, RLVR_PATH: 10}, 50),
+        ]
+    )
+    def test_combine_dataset_dict_form(self, _name, mixer, expected_len):
+        ds = utils.combine_dataset(mixer, splits=["train", "train"], columns_to_keep=["messages"])
+        self.assertEqual(len(ds), expected_len)
+        self.assertIn("messages", ds.column_names)
+
+    def test_combine_dataset_split_mismatch_raises(self):
+        mixer = {self.SFT_PATH: 1.0, self.RLVR_PATH: 1.0}
+        with self.assertRaises(AssertionError):
+            utils.combine_dataset(mixer, splits=["train"], columns_to_keep=["messages"])
+
+
+class ParseDatasetMixerListTest(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("float_weights", ["a", "0.5", "b", "0.25"], {"a": 0.5, "b": 0.25}),
+            ("int_weights", ["a", "100", "b", "200"], {"a": 100, "b": 200}),
+            ("mixed_weights", ["a", "1.0", "b", "3"], {"a": 1.0, "b": 3}),
+            ("single_entry", ["only", "0.7"], {"only": 0.7}),
+        ]
+    )
+    def test_parse_valid(self, _name, mixer_list, expected):
+        self.assertEqual(utils.parse_dataset_mixer_list(mixer_list), expected)
+
+    def test_odd_length_raises(self):
+        with self.assertRaises(AssertionError):
+            utils.parse_dataset_mixer_list(["a", "1.0", "b"])
+
+    def test_non_string_key_raises(self):
+        with self.assertRaises(AssertionError):
+            utils.parse_dataset_mixer_list([123, "1.0"])
 
 
 def setup_beaker_mocks(mock_beaker_from_env, mock_is_beaker_job, initial_description):
@@ -464,6 +529,7 @@ class TestUtilityFunctions(unittest.TestCase):
             ("NVIDIA L40S", "l40s"),
             ("NVIDIA RTX A6000", "a6000"),
             ("NVIDIA A100-SXM4-80GB", "a100"),
+            ("NVIDIA B300", "b300"),
             ("NVIDIA RTX PRO 6000 Blackwell Server Edition", "pro 6000"),
             ("NVIDIA RTX 6000 Ada Generation", "6000"),
             ("NVIDIA GeForce RTX 4090 Laptop GPU", "4090 laptop"),
@@ -476,6 +542,7 @@ class TestUtilityFunctions(unittest.TestCase):
     @parameterized.expand(
         [
             ("NVIDIA H100 80GB HBM3", {"flops": 990e12, "memory_size": 80e9, "memory_bandwidth": 3.35e12}),
+            ("NVIDIA B300", {"flops": 2250e12, "memory_size": 288e9, "memory_bandwidth": 8e12}),
             ("NVIDIA RTX A6000", {"flops": 155e12, "memory_size": 48e9, "memory_bandwidth": 768e9}),
             (
                 "NVIDIA RTX PRO 6000 Blackwell Server Edition",
@@ -544,6 +611,7 @@ class TestModelDims(unittest.TestCase):
             ("two_engines_four_gpus_each", "Qwen/Qwen2.5-7B", 16, 2, 256, 256, 8, 2, 4, 4, 8.0, 4.0),
             ("four_engines_two_gpus_each", "Qwen/Qwen2.5-7B", 16, 2, 256, 256, 8, 4, 2, 4, 8.0, 4.0),
             ("single_engine_eight_gpus", "Qwen/Qwen2.5-7B", 16, 2, 256, 256, 8, 1, 8, 4, 8.0, 4.0),
+            ("hybrid_two_engines_two_gpus_each", "olmo-hybrid-7b", 8, 2, 256, 256, 4, 2, 2, 4, 8.0, 4.0),
         ]
     )
     def test_multi_engine_utilization(
@@ -690,6 +758,62 @@ class TestModelDimsFromHFConfig(unittest.TestCase):
             model_dims = utils.ModelDims.from_hf_config("test/cpu")
 
         self.assertIsNone(model_dims.device_name)
+
+    def test_from_hf_config_hybrid(self):
+        config = SimpleNamespace(
+            model_type="olmo_hybrid",
+            hidden_size=3840,
+            intermediate_size=11008,
+            num_attention_heads=30,
+            num_key_value_heads=30,
+            head_dim=128,
+            num_hidden_layers=8,
+            vocab_size=100352,
+            layer_types=["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 2,
+            linear_num_key_heads=30,
+            linear_num_value_heads=30,
+            linear_key_head_dim=96,
+            linear_value_head_dim=192,
+            linear_conv_kernel_dim=4,
+        )
+        config.get_text_config = lambda: config
+
+        with (
+            mock.patch("transformers.AutoConfig.from_pretrained", return_value=config),
+            mock.patch("torch.cuda.is_available", return_value=False),
+        ):
+            model_dims = utils.ModelDims.from_hf_config("test/hybrid")
+
+        self.assertEqual(model_dims.num_linear_attn_layers, 6)
+        self.assertEqual(model_dims.linear_attn_key_dim, 30 * 96)
+        self.assertEqual(model_dims.linear_attn_value_dim, 30 * 192)
+        self.assertEqual(model_dims.linear_attn_conv_size, 4)
+
+
+class TestModelDimsHybrid(unittest.TestCase):
+    def _hybrid_dims(self, num_layers: int = 8) -> utils.ModelDims:
+        return dataclasses.replace(MODEL_DIMS["olmo-hybrid-7b"], num_layers=num_layers, num_params=None)
+
+    def test_linear_attn_flops_scale_linearly(self):
+        dims = self._hybrid_dims()
+        self.assertEqual(dims.linear_attn_flops(2000), 2 * dims.linear_attn_flops(1000))
+
+    def test_decode_flops_constant_per_prompt_length_for_gdn(self):
+        # A purely linear-attention model has no growing context, so decode FLOPs are independent
+        # of prompt length (unlike softmax attention, where they grow with kv_len).
+        gdn_only = self._hybrid_dims(num_layers=6)
+        self.assertEqual(gdn_only.decode_flops([10], [32]), gdn_only.decode_flops([10000], [32]))
+
+    def test_gdn_layers_excluded_from_kv_cache(self):
+        dims = self._hybrid_dims()
+        # Only the 2 full-attention layers (8 total - 6 GDN) write a KV cache.
+        per_token = 2 * dims.num_kv_heads * dims.head_dim * 2
+        self.assertEqual(dims.kv_cache_write_bytes(100), 2 * 100 * per_token)
+
+    def test_gdn_state_bytes_present(self):
+        dims = self._hybrid_dims()
+        state_elems = 30 * 96 * 192
+        self.assertEqual(dims.gdn_state_bytes(10), 6 * 10 * 2 * state_elems * 2)
 
 
 # useful for checking if public datasets are still available

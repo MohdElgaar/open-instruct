@@ -1,4 +1,9 @@
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
+ARG CUDA_VERSION=12
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS cuda12
+FROM nvidia/cuda:13.0.3-devel-ubuntu22.04 AS cuda13
+FROM cuda${CUDA_VERSION}
+
+ARG CUDA_VERSION
 
 ARG DEBIAN_FRONTEND="noninteractive"
 ENV TZ="America/Los_Angeles" \
@@ -42,17 +47,17 @@ RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.c
         | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
     && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
         | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
-    && apt-get update -y && apt-get install -y --no-install-recommends google-cloud-sdk \
+    && apt-get update -y && apt-get install -y --no-install-recommends google-cloud-cli \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 # Taken from https://beaker.org/api/v3/release (add | jq -r '.version' if you want it programmatically).
 ENV BEAKER_VERSION=v1.5.235
 RUN curl --silent \
     --connect-timeout 5 \
-    --max-time 10 \
+    --max-time 180 \
     --retry 5 \
     --retry-delay 0 \
-    --retry-max-time 40 \
+    --retry-max-time 600 \
     --output beaker.tar.gz \
     "https://beaker.org/api/v3/release/cli?os=linux&arch=amd64&version=${BEAKER_VERSION}" \
     && tar -zxf beaker.tar.gz -C /usr/local/bin/ ./beaker \
@@ -66,20 +71,13 @@ ENV UV_CACHE_DIR=/root/.cache/uv \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
     UV_COMPILE_BYTECODE=0 \
     SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OPEN_INSTRUCT=0.0.0+docker
-    NLTK_DATA=/usr/share/nltk_data
 
 # Install dependencies
 RUN --mount=type=cache,target=${UV_CACHE_DIR} \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv run --frozen python -c "import os, nltk; download_dir=os.environ.get('NLTK_DATA', '/usr/share/nltk_data'); os.makedirs(download_dir, exist_ok=True); nltk.download('punkt', download_dir=download_dir); nltk.download('punkt_tab', download_dir=download_dir)"
-
-RUN --mount=type=bind,source=open-instruct,target=open-instruct \
-    uv pip install -e open-instruct
-
-RUN chmod -R a+r ${NLTK_DATA}
-
-RUN uv pip install --no-cache-dir notebook
+    uv run --frozen --no-default-groups --group dev --group cuda${CUDA_VERSION} \
+        python -m nltk.downloader punkt punkt_tab words
 
 # Separate COPY commands required: Docker copies directory *contents*, not the directory itself
 COPY configs configs

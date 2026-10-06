@@ -21,17 +21,19 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Empty
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import ray
 import torch
-import vllm
 from datasets import Dataset
 from olmo_core.data import data_loader
 from ray.util import queue as ray_queue
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer
+
+if TYPE_CHECKING:
+    import vllm
 
 from open_instruct import data_types, padding_free_collator, utils
 from open_instruct.data_types import EnvConfig, EnvConfigEntry
@@ -438,7 +440,7 @@ class StreamingDataLoaderConfig:
     system_prompt_override_file: str | None = None
 
     # Generation
-    temperature: float = 0.7
+    temperature: float = 1.0
     stop_strings: list[str] | None = None
     inflight_updates: bool = True
     eval_response_length: int | None = None
@@ -642,7 +644,7 @@ class StreamingDataLoader(data_loader.DataLoaderBase):
         dummy_qr = torch.tensor([[self.tokenizer.pad_token_id, self.tokenizer.eos_token_id]], dtype=torch.long)
         dummy_attention = torch.tensor([[1, 1]], dtype=torch.long)
         dummy_position_ids = torch.arange(dummy_qr.shape[-1], dtype=torch.long).unsqueeze(0)
-        dummy_response_mask = torch.tensor([[0, 1]], dtype=torch.long)
+        dummy_response_mask = torch.tensor([[False, True]], dtype=torch.bool)
         dummy_advantage = torch.tensor([[0.0, 1.0]], dtype=torch.float)
 
         batch = data_types.CollatedBatchData(
@@ -660,7 +662,7 @@ class StreamingDataLoader(data_loader.DataLoaderBase):
             wait_start_time = time.perf_counter()
             batch_data = ray.get(self.data_prep_actor.get_data.remote(rank=self.dp_rank, step=step))
             trainer_idle_wait_time = time.perf_counter() - wait_start_time
-            batch_data.setdefault("metrics", {})["time/trainer_idle_waiting_for_inference"] = trainer_idle_wait_time
+            batch_data.setdefault("metrics", {})["time/trainer_waiting_for_data"] = trainer_idle_wait_time
             self.training_step = step + 1
             yield batch_data
 
@@ -686,6 +688,7 @@ class BatchStatistics:
     percent_solved_hist: np.ndarray
     no_resampled_prompts: int
     total_prompts: int
+    per_group_generation_times: np.ndarray = field(default_factory=lambda: np.array([], dtype=float))
 
 
 def single_example_collator(examples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -791,7 +794,7 @@ class Group:
 
 def process_group(
     result: data_types.GenerationResult,
-    generation_config: vllm.SamplingParams,
+    generation_config: "vllm.SamplingParams",
     tokenizer: PreTrainedTokenizer,
     dataset: Dataset,
     max_possible_score: float,
@@ -867,7 +870,7 @@ def process_group(
 
 def make_batch_from_groups(
     groups: list[Group],
-    generation_config: vllm.SamplingParams,
+    generation_config: "vllm.SamplingParams",
     training_step: int,
     actor_manager=None,
     filtered_prompts: int = 0,
@@ -875,6 +878,7 @@ def make_batch_from_groups(
     filtered_prompts_solved: int = 0,
     filtered_prompts_nonzero: int = 0,
     no_resampled_prompts: int = 0,
+    stale_results_dropped: int = 0,
 ) -> tuple[data_types.GenerationResult, Batch, dict, BatchStatistics]:
     assert len(groups) > 0, "make_batch_from_groups requires at least one group"
 
@@ -911,6 +915,7 @@ def make_batch_from_groups(
     total_prompt_tokens = 0
     total_response_tokens = 0
     max_generation_time = 0
+    per_group_generation_times: list[float] = []
 
     for group in groups:
         result = group.result
@@ -955,6 +960,7 @@ def make_batch_from_groups(
         total_prompt_tokens += result.token_statistics.num_prompt_tokens
         total_response_tokens += result.token_statistics.num_response_tokens
         max_generation_time = max(max_generation_time, result.token_statistics.generation_time)
+        per_group_generation_times.append(result.token_statistics.generation_time)
 
     accumulated_stats = data_types.TokenStatistics(
         num_prompt_tokens=total_prompt_tokens,
@@ -1008,6 +1014,7 @@ def make_batch_from_groups(
     combined_reward_metrics["model_step_max"] = float(model_steps_array.max())
     combined_reward_metrics["model_step_mean"] = float(model_steps_array.mean())
     combined_reward_metrics["num_steps_off_policy"] = float(training_step - model_steps_array.mean())
+    combined_reward_metrics["stale_results_dropped"] = float(stale_results_dropped)
     percent_solved_mean = np.mean(all_percent_solved) if all_percent_solved else 0.0
 
     total_prompts = len(groups)
@@ -1025,13 +1032,26 @@ def make_batch_from_groups(
         percent_solved_hist=np.array(all_percent_solved),
         no_resampled_prompts=no_resampled_prompts,
         total_prompts=total_prompts,
+        per_group_generation_times=np.array(per_group_generation_times, dtype=float),
     )
     return combined_result, batch, combined_reward_metrics, batch_stats
 
 
+def result_is_stale(model_step: int | None, training_step: int | None, max_result_age_steps: int | None) -> bool:
+    """Whether an async rollout result is too far behind the current training step.
+
+    Returns False (never stale) when staleness checking is disabled or the inputs are
+    unavailable. A result is stale when ``training_step - model_step`` exceeds
+    ``max_result_age_steps``.
+    """
+    if max_result_age_steps is None or training_step is None or model_step is None:
+        return False
+    return training_step - model_step > max_result_age_steps
+
+
 def accumulate_inference_batches(
     inference_results_Q: ray_queue.Queue,
-    generation_config: vllm.SamplingParams,
+    generation_config: "vllm.SamplingParams",
     num_prompts: int,
     model_dims: utils.ModelDims,
     tokenizer: PreTrainedTokenizer,
@@ -1050,6 +1070,7 @@ def accumulate_inference_batches(
     max_possible_score: float = 1.0,
     requeue_on_timeout: bool = True,
     ground_truth_overrides: dict[int, Any] | None = None,
+    max_result_age_steps: int | None = None,
 ) -> (
     tuple[data_types.GenerationResult, Batch, dict, BatchStatistics]
     | tuple[data_types.ShutdownSentinel | None, None, None, None]
@@ -1062,12 +1083,18 @@ def accumulate_inference_batches(
             "replenish_prompts requires param_prompt_Q and iter_dataloader and dataset"
         )
 
+    if max_result_age_steps is not None and not replenish_prompts:
+        # Dropping stale results without replenishing would steadily drain the in-flight
+        # prompt pool and eventually hang the accumulator waiting for results that never come.
+        raise ValueError("max_result_age_steps requires replenish_prompts=True to avoid draining the prompt pipeline.")
+
     groups: list[Group] = []
     total_filtered_prompts = 0
     filtered_prompt_zero = 0
     filtered_prompt_solved = 0
     filtered_prompt_nonzero = 0
     total_no_resampled = 0
+    stale_results_dropped = 0
     progress_bar = tqdm(
         total=num_prompts,
         desc=f"Accumulating Responses and Rewarding {num_prompts} prompts",
@@ -1093,13 +1120,42 @@ def accumulate_inference_batches(
                 for r in collected_results:
                     inference_results_Q.put(r)
             raise
-        collected_results.append(result)
         logger.info(
             f"[accumulate_inference_batches] Got result {num_prompts_sampled + 1}/{num_prompts}, type: {type(result).__name__}"
         )
 
         if isinstance(result, data_types.ShutdownSentinel):
             return result, None, None, None
+
+        # Drop rollouts generated by a policy that is now too far behind the trainer
+        # (async off-policy lag). Replenish a fresh prompt so the generator keeps up, and
+        # don't keep the stale result around for requeue-on-timeout.
+        if result_is_stale(result.model_step, training_step, max_result_age_steps):
+            stale_results_dropped += 1
+            logger.warning(
+                "[accumulate_inference_batches] Dropping stale result for index=%s at training_step=%s: "
+                "model_step=%s lag=%s max_result_age_steps=%s",
+                result.index,
+                training_step,
+                result.model_step,
+                training_step - result.model_step,
+                max_result_age_steps,
+            )
+            # replenish_prompts is guaranteed True here (validated above), so always
+            # replenish a fresh prompt to keep the in-flight prompt pool from draining.
+            assert iter_dataloader is not None and param_prompt_Q is not None
+            add_prompt_to_generator(
+                next(iter_dataloader),
+                iter_dataloader._epoch,
+                param_prompt_Q,
+                generation_config,
+                is_eval=False,
+                base_env_config=base_env_config,
+                ground_truth_overrides=ground_truth_overrides,
+            )
+            continue
+
+        collected_results.append(result)
 
         group = process_group(
             result=result,
@@ -1147,6 +1203,12 @@ def accumulate_inference_batches(
         progress_bar.update(1)
         groups.append(group)
 
+    if stale_results_dropped > 0:
+        logger.info(
+            f"[accumulate_inference_batches] training_step={training_step}: dropped {stale_results_dropped} "
+            f"stale result(s) this batch (max_result_age_steps={max_result_age_steps})"
+        )
+
     if len(groups) == 0:
         logging.warning(
             "[Data Preparation Thread] All prompts were filtered during accumulation. "
@@ -1165,6 +1227,7 @@ def accumulate_inference_batches(
         filtered_prompts_solved=filtered_prompt_solved,
         filtered_prompts_nonzero=filtered_prompt_nonzero,
         no_resampled_prompts=total_no_resampled,
+        stale_results_dropped=stale_results_dropped,
     )
 
 
@@ -1386,7 +1449,7 @@ class DataPreparationActor:
             )
 
         while self.training_step < self.num_training_steps:
-            generation_idle_wait_start_time = time.perf_counter()
+            generation_wait_start_time = time.perf_counter()
             wait_count = 0
             while self.training_step - self._last_consumed_step > self.config.async_steps:
                 if (wait_count + 1) % 1000 == 0:
@@ -1395,7 +1458,7 @@ class DataPreparationActor:
                     )
                 time.sleep(0.1)
                 wait_count += 1
-            generation_idle_wait_time = time.perf_counter() - generation_idle_wait_start_time
+            generation_wait_time = time.perf_counter() - generation_wait_start_time
 
             logger.info(
                 f"[DataPreparationActor] Step {self.training_step}: calling accumulate_inference_batches for {self.global_batch_size} prompts"
@@ -1419,6 +1482,7 @@ class DataPreparationActor:
                 max_possible_score=self.config.max_possible_score,
                 base_env_config=self.base_env_config,
                 ground_truth_overrides=self.ground_truth_overrides,
+                max_result_age_steps=self.config.async_steps,
             )
             logger.info(
                 f"[DataPreparationActor] Step {self.training_step}: accumulate_inference_batches returned, result type: {type(result).__name__}"
@@ -1500,6 +1564,11 @@ class DataPreparationActor:
                 for packed_mask in packed_sequences.response_masks
             ]
             packed_sequences.advantages = packed_advantages
+            # `pack_sequences` returns int64 doc-id-valued masks (0 for query/pad, i+1 for tokens of
+            # sample i) because the gather above uses them as integer indices into `lookup_advantages`.
+            # Now that the gather is done, downcast to bool so all downstream consumers see a single
+            # contract.
+            packed_sequences.response_masks = [mask.bool() for mask in packed_sequences.response_masks]
 
             collated_data = prepare_collated_data_for_workers(
                 packed_sequences, self.dp_world_size, self.per_device_train_batch_size, self.tokenizer.pad_token_id
@@ -1525,7 +1594,7 @@ class DataPreparationActor:
             batch_metrics_prefixed = {f"batch/{k}": v for k, v in batch_metrics_dict.items()}
 
             step_metrics = {
-                "time/generation_idle_waiting_for_trainer": generation_idle_wait_time,
+                "time/generation_waiting_for_trainer": generation_wait_time,
                 "scores": scores.mean(),
                 "real_batch_size_ratio": real_num_responses / expected_num_responses,
                 "unsolved_batch_size_ratio": unsolved_num_responses / real_num_responses,
@@ -1562,7 +1631,10 @@ class DataPreparationActor:
             assert result.token_statistics is not None
             total_tokens = result.token_statistics.num_prompt_tokens + result.token_statistics.num_response_tokens
             step_metrics["val/actor_tokens_per_second"] = total_tokens / result.token_statistics.generation_time
-            step_metrics["time/getting_response"] = result.token_statistics.generation_time
+            group_times = batch_stats.per_group_generation_times
+            step_metrics["time/group_generation_mean"] = float(group_times.mean())
+            step_metrics["time/group_generation_max"] = float(group_times.max())
+            step_metrics["time/group_generation_min"] = float(group_times.min())
 
             with self.lock:
                 self.prepared_data[self.training_step] = collated_data

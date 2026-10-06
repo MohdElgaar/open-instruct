@@ -29,7 +29,6 @@ uv run python mason.py \
     --preemptible \
     --image $BEAKER_IMAGE --pure_docker_mode \
     --num_nodes $NUM_NODES \
-    --budget ai2/oe-other \
     --gpus 8 -- accelerate launch \
     --mixed_precision bf16 \
     --num_processes 64 \
@@ -53,7 +52,7 @@ uv run python mason.py \
     --logging_steps 1 \
     --gradient_checkpointing \
     --report_to wandb \
-    --chat_template_name olmo123 \
+    --chat_template_name tokenizer_default \
     --with_tracking \
     --eval_workspace ai2/olmo-instruct \
     --eval_priority urgent \

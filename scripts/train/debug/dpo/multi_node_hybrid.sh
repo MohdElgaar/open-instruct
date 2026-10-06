@@ -24,7 +24,6 @@ uv run python mason.py \
     --env TORCH_DIST_INIT_BARRIER=1 \
     --env TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800 \
     --num_nodes 2 \
-    --budget ai2/oe-other \
     --gpus 8 -- accelerate launch \
     --mixed_precision bf16 \
     --num_processes 8 \
@@ -50,7 +49,7 @@ uv run python mason.py \
     --beta 5 \
     --packing \
     --activation_memory_budget 0.5 \
-    --chat_template_name olmo123 \
+    --chat_template_name tokenizer_default \
     --with_tracking \
     --push_to_hub false \
     --try_launch_beaker_eval_jobs false \

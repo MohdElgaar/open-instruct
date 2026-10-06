@@ -30,11 +30,13 @@ OPEN_INSTRUCT_COMMANDS = [
     "open_instruct/finetune.py",
     "open_instruct/dpo.py",
     "open_instruct/dpo_tune_cache.py",
+    "open_instruct/grpo.py",
     "open_instruct/grpo_fast.py",
     "open_instruct/reward_modeling.py",
 ]
 
-OPEN_INSTRUCT_RESUMABLES = ["open_instruct/grpo_fast.py"]
+OPEN_INSTRUCT_RESUMABLES = ["open_instruct/grpo.py", "open_instruct/grpo_fast.py"]
+
 
 CACHE_EXCLUDED_ARGS = {
     "--with_tracking": False,
@@ -54,24 +56,24 @@ def build_command_without_args(command, args_to_remove):
         args_to_remove: Dict mapping argument names to boolean indicating if they have values
                        e.g., {"--with_tracking": False, "--checkpoint_state_dir": True}
 
+    For value-bearing args, the following token is consumed only if it doesn't itself start
+    with "--" — otherwise the flag is dropped alone and the next flag is preserved.
+
     Returns:
         New command list with specified arguments removed
     """
-    result = []
-    skip_next = False
-
-    for item in command:
-        if skip_next:
-            skip_next = False
-            continue
-
+    result: list[str] = []
+    i = 0
+    while i < len(command):
+        item = command[i]
         if item in args_to_remove:
-            if args_to_remove[item]:
-                skip_next = True
+            if args_to_remove[item] and i + 1 < len(command) and not command[i + 1].startswith("--"):
+                i += 2
+            else:
+                i += 1
             continue
-
         result.append(item)
-
+        i += 1
     return result
 
 
@@ -114,7 +116,9 @@ def get_args():
         "--hostname", type=str, nargs="+", help="Beaker hostname on which the job could be run.", default=None
     )
     parser.add_argument("--max_retries", type=int, help="Number of retries", default=0)
-    parser.add_argument("--budget", type=str, help="Budget to use.", required=True)
+    parser.add_argument(
+        "--budget", type=str, help="Budget to use. If omitted, the workspace's default budget is used.", default=None
+    )
     parser.add_argument("--gpus", type=int, help="Number of gpus", default=0)
     parser.add_argument(
         "--shared_memory", type=str, help="Shared memory size (e.g., '10gb', '10.24gb')", default="10.24gb"
@@ -137,6 +141,19 @@ def get_args():
         for instance `/models:01HQXGAYGCS6D4ZK51K83CM49Y`.
         """,
         type=parse_beaker_dataset,
+        default=[],
+    )
+    parser.add_argument(
+        "--extra_weka_buckets",
+        nargs="*",
+        help="""Extra WEKA buckets to mount at `/weka/[bucket]`, in addition to
+        `oe-adapt-default` and `oe-training-default`. Only honored when every requested
+        cluster is a WEKA cluster. Opt-in because a bucket that a cluster does not export
+        cannot be detected before launch: Beaker has no bucket listing, and a bad
+        reference fails the job at mount time. For example, the Olmo 3.5 hero checkpoints
+        live in `olmo-3p5-checkpoints`.
+        """,
+        type=str,
         default=[],
     )
     parser.add_argument(
@@ -292,6 +309,10 @@ def get_env_vars(
         "WANDB_API_KEY",
         "BEAKER_TOKEN",
         "OPENAI_API_KEY",
+        # Lets jobs read gs:// paths (olmo-core's io layer speaks GCS natively).
+        # On-premise clusters have no GCE metadata server, so without this a job
+        # falls back to anonymous credentials and fails.
+        "GOOGLE_APPLICATION_CREDENTIALS",
         # litellm expects these env vars
         "AZURE_API_KEY",
         "AZURE_API_BASE",
@@ -345,18 +366,17 @@ def get_env_vars(
     return env_vars
 
 
-def get_datasets(beaker_datasets, cluster: list[str], mount_docker_socket: bool = False):
+def get_datasets(
+    beaker_datasets, cluster: list[str], mount_docker_socket: bool = False, extra_weka_buckets: list[str] | None = None
+):
     """if pure docker mode we don't mount the NFS; so we can run it on jupiter2"""
     res = []
     # if all cluster is in weka, we mount the weka
     if all(c in launch_utils.WEKA_CLUSTERS for c in cluster):
+        buckets = ["oe-adapt-default", "oe-training-default", *(extra_weka_buckets or [])]
         res = [
-            beaker.BeakerDataMount(
-                source=beaker.BeakerDataSource(weka="oe-adapt-default"), mount_path="/weka/oe-adapt-default"
-            ),
-            beaker.BeakerDataMount(
-                source=beaker.BeakerDataSource(weka="oe-training-default"), mount_path="/weka/oe-training-default"
-            ),
+            beaker.BeakerDataMount(source=beaker.BeakerDataSource(weka=bucket), mount_path=f"/weka/{bucket}")
+            for bucket in dict.fromkeys(buckets)
         ]
     if mount_docker_socket:
         res.append(
@@ -373,6 +393,21 @@ def get_datasets(beaker_datasets, cluster: list[str], mount_docker_socket: bool 
     return res
 
 
+# A tag-like argument such as `<think>`, `</answer>`, `<|im_end|>` or `<tool name="search">`. A bare
+# redirection (`>`, `2>&1`, `<input.txt`) has no closing `>` after its `<` and so does not match.
+TAG_ARG_PATTERN = re.compile(r"<[^<>]*>")
+
+
+def quote_literal_args(command: list[str]) -> list[str]:
+    """Shell-quote the args that must reach the job verbatim before the command is joined for `bash -c`.
+
+    The rest of the command is passed through untouched, since launch scripts rely on `&&`, `cd` and `$VARS`.
+    Unquoted, `<think>` is a redirection and `{"a": 1}` loses its double quotes.
+    """
+    # `</` alone is kept from the original rule, so a closing-tag prefix such as `</tool_call` stays literal.
+    return [shlex.quote(arg) if "{" in arg or "</" in arg or TAG_ARG_PATTERN.search(arg) else arg for arg in command]
+
+
 def make_internal_command(command: list[str], args: argparse.Namespace, whoami: str, is_external_user: bool) -> str:
     # pass through WANDB_ENTITY and WANDB_PROJECT
     if "WANDB_ENTITY" in os.environ:
@@ -381,12 +416,6 @@ def make_internal_command(command: list[str], args: argparse.Namespace, whoami: 
         command = [f"WANDB_PROJECT={os.environ['WANDB_PROJECT']}"] + command
     if "WANDB_TAGS" in os.environ:
         command = [f"WANDB_TAGS={os.environ['WANDB_TAGS']}"] + command
-
-    # escape the command (e.g., --stop_strings "</answer>")
-    for i in range(len(command)):
-        if "</" in command[i]:
-            command[i] = f"'{command[i]}'"
-    # breakpoint()
 
     is_open_instruct_training = any(cmd in command for cmd in OPEN_INSTRUCT_COMMANDS)
     if is_open_instruct_training:
@@ -500,8 +529,8 @@ def make_internal_command(command: list[str], args: argparse.Namespace, whoami: 
                     console.log(
                         f"🔍🔍🔍 Automatically overriding the `--output_dir` argument to be in `{new_output_dir_path}/`"
                     )
-                    command.append("--output_dir")
-                    command.append(f"{new_output_dir_path}/")
+                    command = build_command_without_args(command, {"--output_dir": True})
+                    command.extend(["--output_dir", f"{new_output_dir_path}/"])
             else:
                 no_eval_commands = [
                     ["--try_launch_beaker_eval_jobs", "False"],
@@ -519,13 +548,7 @@ def make_internal_command(command: list[str], args: argparse.Namespace, whoami: 
                         "3. in the training command, use a `--output_dir` that starts with `/weka/`"
                     )
 
-    # special logic to deal with escape like
-    # python mason.py ... -- python x.py --dataset_mixer '{"trl-internal-testing/sentiment-trl-style": 1.0}'
-    # we need to wrap the json string with single quote
-    for idx in range(len(command)):
-        if "{" in command[idx]:
-            command[idx] = "'" + command[idx] + "'"
-    joined_command = " ".join(command)
+    joined_command = " ".join(quote_literal_args(command))
     if args.num_nodes > 1:
         if "--num_processes" not in joined_command and "accelerate" in joined_command:
             raise ValueError("num_processes must be specified in the command for accelerate-based multi-node jobs.")
@@ -576,7 +599,7 @@ def make_task_spec(args, full_command: str, i: int, beaker_secrets: list[str], w
         command=["/bin/bash", "-c"],
         arguments=[full_command],
         result=beaker.BeakerResultSpec(path="/output"),
-        datasets=get_datasets(args.beaker_datasets, args.cluster, args.mount_docker_socket),
+        datasets=get_datasets(args.beaker_datasets, args.cluster, args.mount_docker_socket, args.extra_weka_buckets),
         context=beaker.BeakerTaskContext(
             priority=beaker.BeakerJobPriority[args.priority], preemptible=args.preemptible
         ),
@@ -679,6 +702,7 @@ def maybe_override_checkpoint_dir(
     console.log(
         f"🔍🔍🔍 Automatically overriding the `--checkpoint_state_dir` argument to be in `{new_checkpoint_state_path}`"
     )
+    command = build_command_without_args(command, {"--checkpoint_state_dir": True})
     command.extend(["--checkpoint_state_dir", str(new_checkpoint_state_path)])
 
     return command

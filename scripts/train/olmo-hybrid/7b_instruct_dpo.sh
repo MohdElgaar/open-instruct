@@ -31,7 +31,6 @@ uv run python mason.py \
     --env TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800 \
     --env TRITON_PRINT_AUTOTUNING=1 \
     --num_nodes 4 \
-    --budget ai2/oe-other \
     --gpus 8 -- accelerate launch \
     --mixed_precision bf16 \
     --num_processes 8 \
@@ -59,5 +58,5 @@ uv run python mason.py \
     --beta 5 \
     --packing \
     --activation_memory_budget 0.5 \
-    --chat_template_name olmo123 \
+    --chat_template_name tokenizer_default \
     --with_tracking

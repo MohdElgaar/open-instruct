@@ -24,7 +24,6 @@ do
         --env NCCL_IB_TIMEOUT=23 \
         --env NCCL_IB_RETRY_CNT=7 \
         --num_nodes 4 \
-        --budget ai2/oe-other \
         --gpus 8 -- torchrun \
         --nnodes=4 \
         --node_rank=\$BEAKER_REPLICA_RANK \
@@ -35,7 +34,7 @@ do
         --exp_name "$EXP_NAME" \
         --model_name_or_path "$MODEL_NAME" \
         --config_name olmo3_7B \
-        --chat_template_name olmo123 \
+        --chat_template_name tokenizer_default \
         --max_seq_length 16384 \
         --per_device_train_batch_size 1 \
         --gradient_accumulation_steps 4 \

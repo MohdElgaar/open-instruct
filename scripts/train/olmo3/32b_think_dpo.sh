@@ -20,7 +20,6 @@ do
         --env NCCL_TUNER_CONFIG_PATH=/var/lib/tcpxo/lib64/a3plus_tuner_config_ll128.textproto \
         --env NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/var/lib/tcpxo/lib64/a3plus_guest_config_ll128.textproto \
         --num_nodes $NUM_NODES \
-        --budget ai2/oe-other \
         --no_auto_dataset_cache \
         --gpus 8 -- source /var/lib/tcpxo/lib64/nccl-env-profile.sh \&\& accelerate launch \
         --mixed_precision bf16 \
@@ -45,7 +44,7 @@ do
         --weight_decay 0.0 \
         --logging_steps 1 \
         --gradient_checkpointing \
-        --chat_template_name olmo123 \
+        --chat_template_name tokenizer_default \
         --with_tracking \
         --log_grad_norm True \
         --seed 42 \

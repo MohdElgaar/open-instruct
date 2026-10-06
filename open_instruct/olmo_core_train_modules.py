@@ -13,10 +13,12 @@ import torch.distributed as dist
 import torch.distributed.checkpoint.state_dict as dist_cp_sd
 import wandb
 from olmo_core.distributed import utils as dist_utils
+from olmo_core.nn.attention import AttentionBackendName
 from olmo_core.nn.lm_head import LMHead, LMOutputWithLoss
 from olmo_core.nn.transformer import Transformer
 from olmo_core.optim import OptimConfig
 from olmo_core.optim.scheduler import Scheduler
+from olmo_core.train.common import ReduceType
 from olmo_core.train.train_module import TransformerTrainModule
 from olmo_core.train.train_module.transformer import config as transformer_config
 from torch.distributed.tensor import DTensor, Replicate, Shard
@@ -27,6 +29,11 @@ from open_instruct import dpo_utils, grpo_utils, logger_utils, model_utils, padd
 from open_instruct.rl_utils import masked_mean
 
 logger = logger_utils.setup_logger(__name__)
+
+
+_DOC_LENS_ATTN_BACKENDS = frozenset(
+    {AttentionBackendName.flash_2, AttentionBackendName.flash_3, AttentionBackendName.flash_4}
+)
 
 
 class DPOLMHead(LMHead):
@@ -113,6 +120,7 @@ class DPOTrainModule(TransformerTrainModule):
         sample_microbatch_size: int,
         max_sequence_length: int,
         dpo_config: dpo_utils.DPOExperimentConfig,
+        attn_implementation: AttentionBackendName,
         dp_config: transformer_config.TransformerDataParallelConfig | None = None,
         tp_config: transformer_config.TransformerTensorParallelConfig | None = None,
         cp_config: transformer_config.TransformerContextParallelConfig | None = None,
@@ -124,6 +132,11 @@ class DPOTrainModule(TransformerTrainModule):
         state_dict_save_opts: dist_cp_sd.StateDictOptions | None = None,
         state_dict_load_opts: dist_cp_sd.StateDictOptions | None = None,
     ) -> None:
+        if dpo_config.packing:
+            assert attn_implementation in _DOC_LENS_ATTN_BACKENDS, (
+                f"DPOTrainModule with packing requires a flash attention backend for intra-document "
+                f"masking via doc_lens/max_doc_lens; got {attn_implementation}."
+            )
         # TODO(finbarrtimbers): Remove this hack once Transformer supports configuring the LM head.
         model.lm_head.__class__ = DPOLMHead
         rank_microbatch_size_tokens = sample_microbatch_size * max_sequence_length * 2
@@ -214,7 +227,8 @@ class DPOTrainModule(TransformerTrainModule):
         micro_batches = split_batch_dpo(batch, self.sample_microbatch_size)
         num_micro_batches = len(micro_batches)
         device = batch["chosen_input_ids"].device
-        total_tokens = padding_free_collator.get_num_tokens(batch)
+        micro_token_counts = [padding_free_collator.get_num_tokens(mb) for mb in micro_batches]
+        total_tokens = sum(micro_token_counts)
 
         for v in self._metrics.values():
             v.zero_()
@@ -222,7 +236,7 @@ class DPOTrainModule(TransformerTrainModule):
         for micro_batch_idx, micro_batch in enumerate(micro_batches):
             with self._train_microbatch_context(micro_batch_idx, num_micro_batches):
                 loss, step_metrics = self._compute_microbatch_loss(micro_batch)
-                micro_tokens = padding_free_collator.get_num_tokens(micro_batch)
+                micro_tokens = micro_token_counts[micro_batch_idx]
                 weight = micro_tokens / total_tokens
                 for k, v in step_metrics.items():
                     self._metrics[k] += v.detach() * micro_tokens
@@ -231,39 +245,76 @@ class DPOTrainModule(TransformerTrainModule):
         self.model.post_batch(dry_run=dry_run)
 
         if not dry_run:
-            metric_keys = sorted(self._metrics.keys())
-            local_sums_list = [torch.tensor(total_tokens, dtype=torch.float32, device=device)] + [
-                self._metrics[k] for k in metric_keys
-            ]
-            local_sums = torch.stack(local_sums_list)
-            dist.all_reduce(local_sums, op=dist.ReduceOp.SUM, group=self.trainer.dp_process_group)
+            local_padded_tokens = padding_free_collator.get_num_padded_tokens(batch)
+            local_num_sequences = padding_free_collator.get_num_sequences(batch)
 
-            global_total_tokens = local_sums[0]
-            global_metrics = {k: local_sums[i + 1] / global_total_tokens for i, k in enumerate(metric_keys)}
-
-            self.record_metric("train/loss", global_metrics["loss"].item(), reduce_type=None)
-            self.record_metric("train/logps_chosen", global_metrics["chosen_logps"].item(), reduce_type=None)
-            self.record_metric("train/logps_rejected", global_metrics["rejected_logps"].item(), reduce_type=None)
             token_count = self.trainer.data_loader.global_num_tokens_in_batch(batch)
             assert token_count is not None
             self.record_metric("train/token_count", token_count, reduce_type=None)
 
+            weighted_sums = {
+                "train_loss": self._metrics["loss"],
+                "logps/chosen": self._metrics["chosen_logps"],
+                "logps/rejected": self._metrics["rejected_logps"],
+            }
             if self.dpo_config.loss_type.computes_reward_metrics:
-                margin = global_metrics["chosen_rewards"] - global_metrics["rejected_rewards"]
-                self.record_metric("train/rewards_chosen", global_metrics["chosen_rewards"].item(), reduce_type=None)
-                self.record_metric(
-                    "train/rewards_rejected", global_metrics["rejected_rewards"].item(), reduce_type=None
-                )
-                self.record_metric(
-                    "train/rewards_average",
-                    ((global_metrics["chosen_rewards"] + global_metrics["rejected_rewards"]) / 2).item(),
-                    reduce_type=None,
-                )
-                self.record_metric("train/rewards_accuracy", global_metrics["accuracy"].item(), reduce_type=None)
-                self.record_metric("train/rewards_margin", margin.item(), reduce_type=None)
+                chosen_rewards = self._metrics["chosen_rewards"]
+                rejected_rewards = self._metrics["rejected_rewards"]
+                weighted_sums["rewards/chosen"] = chosen_rewards
+                weighted_sums["rewards/rejected"] = rejected_rewards
+                weighted_sums["rewards/average"] = (chosen_rewards + rejected_rewards) / 2
+                weighted_sums["rewards/accuracy"] = self._metrics["accuracy"]
+                weighted_sums["rewards/margin"] = chosen_rewards - rejected_rewards
+            if "aux_loss" in self._metrics:
+                weighted_sums["aux_loss"] = self._metrics["aux_loss"]
 
-            if "aux_loss" in global_metrics:
-                self.record_metric("train/aux_loss", global_metrics["aux_loss"].item(), reduce_type=None)
+            # DPO token-weighted metrics are ratios sum_ranks(sum_mb(metric*tokens)) / sum_ranks(tokens).
+            # Stack the shared denominators (real and padded token counts) with the numerators and
+            # reduce them in one all-reduce over the DP group, then divide. TP/CP duplicate ranks share
+            # a batch, so reducing over dp_process_group (not the whole world) avoids double-counting.
+            metric_names = list(weighted_sums.keys())
+            local_sums = torch.stack(
+                [
+                    torch.tensor(float(total_tokens), device=device),
+                    torch.tensor(float(local_padded_tokens), device=device),
+                    *[weighted_sums[name] for name in metric_names],
+                ]
+            )
+            dist.all_reduce(local_sums, op=dist.ReduceOp.SUM, group=self.trainer.dp_process_group)
+            global_tokens, global_padded = local_sums[0], local_sums[1]
+            for i, name in enumerate(metric_names):
+                self.record_metric(name, (local_sums[i + 2] / global_tokens).item(), reduce_type=None)
+            self.record_metric(
+                "train/padding_fraction", (1.0 - global_tokens / global_padded).item(), reduce_type=None
+            )
+
+            local_num_sequences_f = local_num_sequences.to(device=device, dtype=torch.float32)
+            # Use mean rather than sum: the reduction runs over the whole world, but all non-DP
+            # ranks (TP, CP) in a DP shard process the same batch. mean divides the world-group sum
+            # by world_size, yielding the average per-rank sequence count without double-counting
+            # the duplicated ranks.
+            self.record_metric("train/sequences_per_rank", local_num_sequences_f, reduce_type=ReduceType.mean)
+            # Global per-step total across DP shards. ReduceType.sum reduces over the whole world, so
+            # pre-divide by the TP/CP duplication factor (world_size / dp_world_size) to count each
+            # DP shard's sequences once.
+            dp_world_size = dist.get_world_size(self.trainer.dp_process_group) if self.trainer.dp_process_group else 1
+            sequence_dup_factor = dist.get_world_size() // dp_world_size
+            self.record_metric(
+                "train/global_sequences_per_step",
+                local_num_sequences_f / sequence_dup_factor,
+                reduce_type=ReduceType.sum,
+            )
+
+            self.record_metric("training_step", float(self.trainer.global_step), reduce_type=None)
+            assert self.trainer.steps_per_epoch is not None
+            self.record_metric("epoch", self.trainer.global_step / self.trainer.steps_per_epoch, reduce_type=None)
+            if self.scheduler is not None and self.trainer.max_steps is not None:
+                lr = self.scheduler.get_lr(
+                    self.optim.param_groups[0].get("initial_lr", self.optim.param_groups[0]["lr"]),
+                    self.trainer.global_step,
+                    self.trainer.max_steps,
+                )
+                self.record_metric("learning_rate", float(lr), reduce_type=None)
 
 
 class GRPOTrainModule(TransformerTrainModule):
@@ -291,6 +342,7 @@ class GRPOTrainModule(TransformerTrainModule):
         temperature: float,
         tokenizer: PreTrainedTokenizer,
         streaming_config: data_loader_lib.StreamingDataLoaderConfig,
+        attn_implementation: AttentionBackendName,
         ref_policy: Transformer | None = None,
         dp_config: transformer_config.TransformerDataParallelConfig | None = None,
         ac_config: transformer_config.TransformerActivationCheckpointingConfig | None = None,
@@ -301,6 +353,10 @@ class GRPOTrainModule(TransformerTrainModule):
         state_dict_save_opts: dist_cp_sd.StateDictOptions | None = None,
         state_dict_load_opts: dist_cp_sd.StateDictOptions | None = None,
     ):
+        assert attn_implementation in _DOC_LENS_ATTN_BACKENDS, (
+            f"GRPOTrainModule requires a flash attention backend for intra-document masking via "
+            f"doc_lens/max_doc_lens; got {attn_implementation}."
+        )
         rank_microbatch_size_tokens = sample_microbatch_size * max_sequence_length
         super().__init__(
             model=model,
@@ -322,6 +378,7 @@ class GRPOTrainModule(TransformerTrainModule):
         self.temperature = temperature
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
+        self.attn_implementation = attn_implementation
 
         self.ref_policy = ref_policy
         if ref_policy is not None:
@@ -391,6 +448,7 @@ class GRPOTrainModule(TransformerTrainModule):
                     self.temperature,
                     use_grad=False,
                     batch_size=3 * self.rank_microbatch_size,
+                    pass_olmo_core_doc_lens=True,
                 )
             else:
                 ref_logprobs_BT = None
@@ -411,12 +469,13 @@ class GRPOTrainModule(TransformerTrainModule):
                         self.temperature,
                         use_grad=False,
                         batch_size=3 * self.rank_microbatch_size,
+                        pass_olmo_core_doc_lens=True,
                     )
 
                 for i in range(num_samples):
                     if self.grpo_config.use_vllm_logprobs:
                         old_logprobs_BT[i] = grpo_utils.mask_logprobs(
-                            data_BT.vllm_logprobs[i][:, 1:], data_BT.response_masks[i][:, 1:].bool()
+                            data_BT.vllm_logprobs[i][:, 1:], data_BT.response_masks[i][:, 1:]
                         )
                     else:
                         assert local_old_logprobs_BT is not None
@@ -458,9 +517,10 @@ class GRPOTrainModule(TransformerTrainModule):
                     self.pad_token_id,
                     self.temperature,
                     return_entropy=self.grpo_config.record_entropy,
+                    pass_olmo_core_doc_lens=True,
                 )
 
-                response_mask = data_BT.response_masks[sample_idx][:, 1:].bool()
+                response_mask = data_BT.response_masks[sample_idx][:, 1:]
                 new_logprobs = grpo_utils.mask_logprobs(new_logprobs, response_mask)
 
                 vllm_logprobs = grpo_utils.mask_logprobs(data_BT.vllm_logprobs[sample_idx][:, 1:], response_mask)
@@ -487,10 +547,12 @@ class GRPOTrainModule(TransformerTrainModule):
                 log_ratio = new_logprobs - old_logprob
                 ratio = torch.exp(log_ratio)
 
-                rho = grpo_utils.compute_rho_correction(old_logprob, vllm_logprobs, response_mask, self.grpo_config)
+                rho = grpo_utils.compute_rho_correction(
+                    old_logprob, vllm_logprobs, response_mask, advantages[:, 1:], self.grpo_config
+                )
                 grpo_utils.accumulate_rho_histograms(rho_histograms, rho)
 
-                pg_losses, pg_losses2, pg_loss, kl = grpo_utils.compute_grpo_loss(
+                pg_loss, clipfrac, kl = grpo_utils.compute_grpo_loss(
                     new_logprobs=new_logprobs,
                     ratio=ratio,
                     advantages=advantages[:, 1:],
@@ -509,9 +571,8 @@ class GRPOTrainModule(TransformerTrainModule):
                 grpo_utils.populate_sample_loss_stats(
                     loss_stats_B,
                     sample_idx,
-                    pg_losses,
-                    pg_losses2,
                     pg_loss,
+                    clipfrac,
                     ratio,
                     loss,
                     response_mask,
@@ -534,6 +595,11 @@ class GRPOTrainModule(TransformerTrainModule):
             if not dry_run:
                 self._do_optim_step()
             self.optim.zero_grad(set_to_none=True)
+
+        # Keep _metrics non-empty on every rank every step so OLMo-core's
+        # _log_metrics skip can't fire asymmetrically and deadlock gloo on the
+        # untagged bookkeeping process group.
+        self.record_metric("_metrics_keepalive", float(self.trainer.global_step), reduce_type=None)
 
         if not dry_run and num_steps > 0:
             local_metrics = grpo_utils.compute_metrics_from_loss_stats(loss_stats_B, token_counts)

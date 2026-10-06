@@ -12,7 +12,6 @@ uv run python mason.py \
     --pure_docker_mode \
     --preemptible \
     --num_nodes 2 \
-    --budget ai2/oe-other \
     --no_auto_dataset_cache \
     --env OLMO_SHARED_FS=1 \
     --env "REFERENCE_LOGPROBS_CACHE_PATH=/tmp/benchmark_cache_\$(date +%s)" \
@@ -25,7 +24,7 @@ uv run python mason.py \
     open_instruct/dpo.py \
     --model_name_or_path "$MODEL_NAME" \
     --config_name olmo3_7B \
-    --chat_template_name olmo123 \
+    --chat_template_name tokenizer_default \
     --max_seq_length 8192 \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 4 \

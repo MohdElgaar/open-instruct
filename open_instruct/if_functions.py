@@ -300,23 +300,21 @@ def verify_postscript(text, postscript_marker):
 
 # Number Placeholder: The response must contain at least {N} placeholders represented by square brackets,
 # such as [address].
-def validate_placeholders(text: str, N: int) -> tuple[bool, list[str]]:
+def validate_placeholders(text: str, N: int) -> bool:
     """
     Validates if a text contains at least the specified number of placeholders in square brackets.
 
     Args:
         text (str): The text to check for placeholders
-        min_placeholders (int): Minimum number of placeholders required
+        N (int): Minimum number of placeholders required
 
     Returns:
-        tuple[bool, List[str]]: A tuple containing:
-            - Boolean indicating if the text meets the placeholder requirement
-            - List of found placeholders
+        bool: True if the text contains at least N placeholders, False otherwise.
 
     Example:
         >>> text = "Hello [name], your [item] will be delivered to [address]"
         >>> validate_placeholders(text, 2)
-        (True, ['name', 'item', 'address'])
+        True
     """
     # Find all placeholders using regex
     pattern = r"\[(.*?)\]"
@@ -330,17 +328,16 @@ def validate_placeholders(text: str, N: int) -> tuple[bool, list[str]]:
 
 # Number Bullets: Your answer must contain exactly {N} bullet points. Use the markdown bullet points such as: * This
 # is a point.
-def verify_bullet_points(text: str, N: int) -> tuple[bool, str]:
+def verify_bullet_points(text: str, N: int) -> bool:
     """
     Verifies if a text contains exactly N bullet points in markdown format.
-    Returns a tuple of (is_valid, message).
 
     Args:
         text (str): The text to check
-        expected_count (int): The expected number of bullet points
+        N (int): The expected number of bullet points
 
     Returns:
-        tuple[bool, str]: (True if constraint is met, explanation message)
+        bool: True if the text contains exactly N bullet points, False otherwise.
     """
     # Split text into lines and count lines starting with * or -
     lines = text.split("\n")
@@ -360,7 +357,9 @@ def validate_title(text: str) -> bool:
 
 # Choose: From Answer with one of the following options: {options}
 def validate_choice(text: str, options: list) -> bool:
-    return any(text in option for option in options)
+    # substring matching yields false positives (e.g. option "A" matches "Apple"); if this
+    # is a problem, switch to a regex, e.g. re.search(rf"(?<!\w){re.escape(str(option))}(?!\w)", text).
+    return any(option in text for option in options)
 
 
 # Minimum Number Highlighted Section: Highlight at least {N} sections in your answer with markdown, i.e. *highlighted
@@ -430,7 +429,7 @@ def validate_frequency_capital_words(text: str, N: int, quantifier: str) -> bool
     if quantifier == "at least":
         return len(words) >= N
     elif quantifier == "around":
-        return len(words) == N
+        return abs(len(words) - N) <= max(round(N * 0.1), 1)
     elif quantifier == "at most":
         return len(words) <= N
     else:
